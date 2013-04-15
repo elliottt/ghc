@@ -194,3 +194,68 @@ endif
 NoFibWays =
 STRIP_CMD = :
 
+ifeq "$(Stage1Only)" "YES"
+
+# Compiler
+disable-compiler-1              := YES
+disable-compiler-2              := YES
+
+# Programs
+disable-utils/compare_sizes-1    := YES
+disable-utils/dll-split-1        := YES
+disable-utils/ghc-cabal-1        := YES
+disable-utils/ghc-pkg-1          := YES
+disable-utils/ghc-pwd-1          := YES
+disable-utils/ghctags-1          := YES
+disable-utils/haddock-1          := YES
+disable-utils/hpc-1              := YES
+disable-utils/hsc2hs-1           := YES
+disable-utils/mkUserGuidePart-1  := YES
+disable-utils/runghc-1           := YES
+disable-utils/compare_sizes-2    := YES
+disable-utils/dll-split-2        := YES
+disable-utils/ghc-cabal-2        := YES
+disable-utils/ghc-pkg-2          := YES
+disable-utils/ghc-pwd-2          := YES
+disable-utils/ghctags-2          := YES
+disable-utils/haddock-2          := YES
+disable-utils/hpc-2              := YES
+disable-utils/hsc2hs-2           := YES
+disable-utils/mkUserGuidePart-2  := YES
+disable-utils/runghc-2           := YES
+
+# Libraries
+disable-libraries/array-2            := YES
+disable-libraries/base-2             := YES
+disable-libraries/binary-2           := YES
+disable-libraries/bin-package-db-2   := YES
+disable-libraries/bytestring-2       := YES
+disable-libraries/Cabal/Cabal-2      := YES
+disable-libraries/containers-2       := YES
+disable-libraries/deepseq-2          := YES
+disable-libraries/directory-2        := YES
+disable-libraries/filepath-2         := YES
+disable-libraries/ghc-prim-2         := YES
+disable-libraries/haskeline-2        := YES
+disable-libraries/haskell2010-2      := YES
+disable-libraries/haskell98-2        := YES
+disable-libraries/hoopl-2            := YES
+disable-libraries/hpc-2              := YES
+disable-libraries/integer-gmp-2      := YES
+disable-libraries/integer-simple-2   := YES
+disable-libraries/old-locale-2       := YES
+disable-libraries/old-time-2         := YES
+disable-libraries/pretty-2           := YES
+disable-libraries/primitive-2        := YES
+disable-libraries/process-2          := YES
+disable-libraries/random-2           := YES
+disable-libraries/template-haskell-2 := YES
+disable-libraries/terminfo-2         := YES
+disable-libraries/time-2             := YES
+disable-libraries/transformers-2     := YES
+disable-libraries/unix-2             := YES
+disable-libraries/vector-2           := YES
+disable-libraries/Win32-2            := YES
+disable-libraries/xhtml-2            := YES
+
+endif

@@ -20,6 +20,8 @@
 # $(eval $(call build-prog,utils/genapply,dist-install,1))
 
 define build-prog
+
+ifneq "$$(disable-$1-$3)" "YES"
 $(call trace, build-prog($1,$2,$3))
 $(call profStart, build-prog($1,$2,$3))
 # $1 = dir
@@ -46,6 +48,8 @@ ifneq "$$($1_$2_NOT_NEEDED)" "YES"
 $$(eval $$(call build-prog-helper,$1,$2,$3))
 endif
 $(call profEnd, build-prog($1,$2,$3))
+endif
+
 endef
 
 

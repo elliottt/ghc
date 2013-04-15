@@ -29,6 +29,8 @@
 # libraries/base_dist_LD_OPTS = -package ghc-prim-0.1.0.0
 
 define build-package
+
+ifneq "$$(disable-$1-$3)" "YES"
 $(call trace, build-package($1,$2,$3))
 $(call profStart, build-package($1,$2,$3))
 # $1 = dir
@@ -52,6 +54,8 @@ ifneq "$$($1_$2_NOT_NEEDED)" "YES"
 $$(eval $$(call build-package-helper,$1,$2,$3))
 endif
 $(call profEnd, build-package($1,$2,$3))
+endif
+
 endef
 
 

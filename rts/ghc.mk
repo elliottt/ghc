@@ -24,7 +24,9 @@ rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 rts_dist_WAYS = $(rts_WAYS)
 
 ALL_RTS_LIBS = $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
+.PHONY: all_rts
 all_rts : $(ALL_RTS_LIBS)
+all: all_rts
 
 # -----------------------------------------------------------------------------
 # Defining the sources
