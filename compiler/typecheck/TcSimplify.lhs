@@ -375,8 +375,10 @@ having to be passed at each call site.  But of course, the WHOLE
 IDEA is that ?y should be passed at each call site (that's what
 dynamic binding means) so we'd better infer the second.
 
-BOTTOM LINE: when *inferring types* you *must* quantify 
-over implicit parameters. See the predicate isFreeWhenInferring.
+BOTTOM LINE: when *inferring types* you must quantify over implicit
+parameters, *even if* they don't mention the bound type variables.
+Reason: because implicit parameters, uniquely, have local instance
+declarations. See the predicate quantifyPred.
 
 Note [Quantification with errors]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -511,7 +513,8 @@ simplifyRule name lhs_wanted rhs_wanted
        ; traceTc "simplifyRule" $
          vcat [ ptext (sLit "LHS of rule") <+> doubleQuotes (ftext name)
               , text "zonked_lhs_flats" <+> ppr zonked_lhs_flats 
-              , text "q_cts"      <+> ppr q_cts ]
+              , text "q_cts"      <+> ppr q_cts
+              , text "non_q_cts"  <+> ppr non_q_cts ]
 
        ; return ( map (ctEvId . ctEvidence) (bagToList q_cts)
                 , lhs_wanted { wc_flat = non_q_cts }) }

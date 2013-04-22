@@ -35,7 +35,7 @@ endif
 ifneq "$$($1_$2_PROG)" ""
 $$(error $1_$2_PROG is set)
 endif
-$1_$2_PROG = $$($1_$2_PROGNAME)$$(exeext)
+$1_$2_PROG = $$($1_$2_PROGNAME)$$(exeext$3)
 endif
 
 ifeq "$$(findstring $3,0 1 2)" ""
@@ -43,6 +43,8 @@ $$(error $1/$2: stage argument to build-prog should be 0, 1, or 2)
 endif
 
 $(call clean-target,$1,$2,$1/$2)
+
+$$(eval $$(call build-prog-vars,$1,$2,$3))
 
 ifneq "$$($1_$2_NOT_NEEDED)" "YES"
 $$(eval $$(call build-prog-helper,$1,$2,$3))
@@ -53,7 +55,7 @@ endif
 endef
 
 
-define build-prog-helper
+define build-prog-vars
 # $1 = dir
 # $2 = distdir
 # $3 = GHC stage to use (0 == bootstrapping compiler)
@@ -84,8 +86,6 @@ else
 $1_$2_WANT_INSTALLED_WRAPPER = NO
 endif
 
-$(call package-config,$1,$2,$3)
-
 $1_$2_depfile_base = $1/$2/build/.depend
 
 ifeq "$$($1_$2_INSTALL_INPLACE)" "NO"
@@ -112,6 +112,15 @@ else
 $1_$2_INPLACE = $$($$($1_$2_PROGNAME)_INPLACE)
 endif
 endif
+
+endef
+
+define build-prog-helper
+# $1 = dir
+# $2 = distdir
+# $3 = GHC stage to use (0 == bootstrapping compiler)
+
+$(call package-config,$1,$2,$3)
 
 ifeq "$$($1_$2_USES_CABAL)" "YES"
 $(call build-package-data,$1,$2,$3)
@@ -156,7 +165,7 @@ $(call c-sources,$1,$2)
 
 # --- IMPLICIT RULES
 
-$(call distdir-opts,$1,$2,,$3)
+$(call distdir-opts,$1,$2,$3)
 $(call distdir-way-opts,$1,$2,$$($1_$2_PROGRAM_WAY),$3)
 
 ifeq "$3" "0"
@@ -213,7 +222,9 @@ ifeq "$$(TargetOS_CPP)" "darwin"
 ifneq "$3" "0"
 ifeq "$$($1_$2_PROGRAM_WAY)" "dyn"
 # Use relative paths for all the libraries
+ifneq "$$($1_$2_TRANSITIVE_DEP_NAMES)" ""
 	install_name_tool $$(foreach d,$$($1_$2_TRANSITIVE_DEP_NAMES), -change $$(TOP)/$$($$($$d_INSTALL_INFO)_dyn_LIB) @loader_path/../$$d-$$($$($$d_INSTALL_INFO)_VERSION)/$$($$($$d_INSTALL_INFO)_dyn_LIB_NAME)) $$@
+endif
 # Use relative paths for the RTS. Rather than try to work out which RTS
 # way is being linked, we just change it for all ways
 	install_name_tool $$(foreach w,$$(rts_WAYS), -change $$(TOP)/$$(rts_$$w_LIB) @loader_path/../rts-$$(rts_VERSION)/$$(rts_$$w_LIB_NAME)) $$@
@@ -236,8 +247,8 @@ ifneq "$$($1_$2_HS_SRCS)" ""
 ifeq "$$(strip $$(ALL_STAGE1_LIBS))" ""
 $$(error ordering failure in $1 ($2): ALL_STAGE1_LIBS is empty)
 endif
-endif
 $1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_LIBS) $$(ALL_RTS_LIBS) $$(OTHER_LIBS)
+endif
 endif
 endif
 endif
