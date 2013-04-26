@@ -1292,7 +1292,7 @@ constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
 --      C t1 t2
 -- as a btype (treating C as a type constructor) and then convert C to be
 -- a data constructor.  Reason: it might continue like this:
---      C t1 t2 %: D Int
+--      C t1 t2 :% D Int
 -- in which case C really would be a type constructor.  We can't resolve this
 -- ambiguity till we come across the constructor oprerator :% (or not, more usually)
         : btype                         {% splitCon $1 >>= return.LL }
