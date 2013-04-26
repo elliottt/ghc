@@ -134,6 +134,13 @@ mkTyData :: SrcSpan
 mkTyData loc new_or_data promotable cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
   = do { (tc, tparams) <- checkTyClHdr tycl_hdr
        ; tyvars <- checkTyVars tycl_hdr tparams
+
+         -- promotion has been explicitly disabled, make sure that -XDataKinds
+         -- is present
+       ; when (not promotable) $ do
+           pstate  <- getPState
+           let enabled = xopt Opt_DataKinds (dflags pstate)
+           unless enabled (parseError loc "Illegal `data type` declaration (use -XDataKinds to enable)")
        ; defn <- mkDataDefn new_or_data promotable cType mcxt ksig data_cons maybe_deriv
        ; return (L loc (DataDecl { tcdLName = tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
