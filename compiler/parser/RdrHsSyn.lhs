@@ -238,7 +238,7 @@ mkTopSpliceDecl other_expr                          = SpliceD (SpliceDecl other_
 
 mkTyLit :: Located (HsTyLit) -> P (LHsType RdrName)
 mkTyLit l =
-  do allowed <- extension typeLiteralsEnabled
+  do allowed <- extension dataKindsEnabled
      if allowed
        then return (HsTyLit `fmap` l)
        else parseErrorSDoc (getLoc l)
