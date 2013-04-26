@@ -471,6 +471,7 @@ data Token
   | ITgroup
   | ITby
   | ITusing
+  | ITkind
 
   -- Pragmas
   | ITinline_prag InlineSpec RuleMatchInfo
@@ -646,6 +647,7 @@ reservedWordsFM = listToUFM $
          ( "group",          ITgroup,         bit transformComprehensionsBit),
          ( "by",             ITby,            bit transformComprehensionsBit),
          ( "using",          ITusing,         bit transformComprehensionsBit),
+         ( "kind",           ITkind,          bit dataKindsBit),
 
          ( "foreign",        ITforeign,       bit ffiBit),
          ( "export",         ITexport,        bit ffiBit),

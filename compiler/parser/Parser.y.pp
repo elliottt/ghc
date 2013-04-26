@@ -265,6 +265,7 @@ incorrect.
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
+ 'kind'         { L _ ITkind }
 
  '{-# INLINE'             { L _ (ITinline_prag _ _) }
  '{-# SPECIALISE'         { L _ ITspec_prag }
@@ -641,6 +642,9 @@ ty_decl :: { LTyClDecl RdrName }
                 -- infix type constructors to be declared
                 {% do { L loc decl <- mkFamDecl (comb3 $1 $3 $4) TypeFamily $3 (unLoc $4)
                       ; return (L loc (FamDecl decl)) } }
+
+        | 'data' 'kind' type kconstrs
+                {% mkTyDataKind (comb3 $1 $3 $4) $3 (unLoc $4) }
 
           -- ordinary data type or newtype declaration
         | data_or_newtype promotable capi_ctype tycl_hdr constrs deriving
@@ -1320,6 +1324,33 @@ deriving :: { Located (Maybe [LHsType RdrName]) }
         | 'deriving' '(' inst_types1 ')'        { LL (Just $3) }
              -- Glasgow extension: allow partial 
              -- applications in derivings
+
+kconstrs :: { Located [LTyConDecl RdrName] }
+        : maybe_docnext '=' kconstrs1
+                { L (comb2 $2 $3) (addTyConDocs (reverse (unLoc $3)) $1) }
+
+kconstrs1 :: { Located [LTyConDecl RdrName] }
+        : kconstrs1 maybe_docnext '|' maybe_docprev kconstr
+                { LL (addTyConDoc $5 $2 : addTyConDocFirst (unLoc $1) $4) }
+        | kconstr
+                { L1 [$1] }
+
+kconstr :: { LTyConDecl RdrName }
+        : maybe_docnext kconstr_stuff maybe_docprev
+                { let (con,details) = unLoc $2 in
+                  addTyConDoc (L (getLoc $2) (mkTyConDecl con details)) ($1 `mplus` $3)
+                }
+
+kconstr_stuff :: { Located (Located RdrName, HsTyConDeclDetails RdrName) }
+          -- we reuse splitCon here because types and kinds are represented in
+          -- the same way
+        : bkind                 {% splitCon $1 >>= \ (con,details) ->
+                                  toTyConDetails (getLoc $1) details >>= \ kdetails ->
+                                  return (LL (con,kdetails))
+                                }
+        | bkind conop bkind     { LL ($2, InfixCon $1 $3) }
+
+
 
 -----------------------------------------------------------------------------
 -- Value definitions
@@ -2011,6 +2042,7 @@ varid :: { Located RdrName }
         | 'interruptible'       { L1 $! mkUnqual varName (fsLit "interruptible") }
         | 'forall'              { L1 $! mkUnqual varName (fsLit "forall") }
         | 'family'              { L1 $! mkUnqual varName (fsLit "family") }
+        | 'kind'                { L1 $! mkUnqual varName (fsLit "kind") }
 
 qvarsym :: { Located RdrName }
         : varsym                { $1 }

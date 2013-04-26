@@ -10,10 +10,11 @@ module RdrHsSyn (
         mkHsDo, mkHsSplice, mkTopSpliceDecl,
         mkClassDecl, 
         mkTyData, mkFamInstData, 
+        mkTyDataKind,
         mkTySynonym, mkTyFamInstEqn, mkTyFamInstGroup,
         mkTyFamInst, 
         mkFamDecl, 
-        splitCon, mkInlinePragma,
+        splitCon, mkInlinePragma, toTyConDetails,
         mkRecConstrOrUpdate, -- HsExp -> [HsFieldUpdate] -> P HsExp
         mkTyLit,
 
@@ -29,6 +30,7 @@ module RdrHsSyn (
         mkExtName,           -- RdrName -> CLabelString
         mkGadtDecl,          -- [Located RdrName] -> LHsType RdrName -> ConDecl RdrName
         mkSimpleConDecl,
+        mkTyConDecl,
         mkDeprecatedGadtRecordDecl,
 
         -- Bunch of functions in the parser monad for
@@ -145,6 +147,38 @@ mkTyData loc new_or_data promotable cType (L _ (mcxt, tycl_hdr)) ksig data_cons 
        ; return (L loc (DataDecl { tcdLName = tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
                                    tcdFVs = placeHolderNames })) }
+
+mkTyDataKind :: SrcSpan
+         -> LHsType RdrName
+         -> [LTyConDecl RdrName]
+         -> P (LTyClDecl RdrName)
+mkTyDataKind loc k_hdr ty_cons
+  = do { (kc, kparamTys) <- checkTyClHdr k_hdr
+       ; unless (null kparamTys) $ do
+           pstate  <- getPState
+           let enabled = xopt Opt_PolyKinds (dflags pstate)
+           unless enabled (parseError loc "Illegal polymorphic `data kind` declaration (use -XPolyKinds to enable)")
+       ; kparams  <- checkTyVars k_hdr kparamTys
+       ; kvars    <- checkKVars kparams
+       ; return $ L loc $ KindDecl
+         { tcdLName    = kc
+         , tcdKVars    = kvars
+         , tcdTypeCons = ty_cons
+         , tcdFvs      = placeHolderNames
+         }
+       }
+
+  where
+
+  -- check that there are no sort signatures
+  checkKVars tparams
+    | not (null (hsq_kvs tparams)) = panic "mkTyDataKind" "unexpected sort variables"
+    | otherwise                    = mapM checkKVar (hsq_tvs tparams)
+
+  checkKVar bndr = case unLoc bndr of
+    UserTyVar n    -> return (L (getLoc bndr) n)
+    KindedTyVar {} -> parseError (getLoc bndr) "kind parameters may not have sort signatures"
+
 
 mkFamInstData :: SrcSpan
          -> NewOrData
@@ -385,6 +419,12 @@ splitCon ty
    mk_rest [L _ (HsRecTy flds)] = RecCon flds
    mk_rest ts                   = PrefixCon ts
 
+toTyConDetails :: SrcSpan -> HsConDeclDetails RdrName -> P (HsTyConDeclDetails RdrName)
+toTyConDetails loc details = case details of
+  PrefixCon args -> return (PrefixCon args)
+  InfixCon l r   -> return (InfixCon l r)
+  RecCon _       -> parseError loc "record notation is not allowd in a `data kind` declaration"
+
 mkDeprecatedGadtRecordDecl :: SrcSpan
                            -> Located RdrName
                            -> [ConDeclField RdrName]
@@ -417,6 +457,14 @@ mkSimpleConDecl name qvars cxt details
             , con_details  = details
             , con_res      = ResTyH98
             , con_doc      = Nothing }
+
+mkTyConDecl :: Located RdrName -> HsTyConDeclDetails RdrName
+            -> TyConDecl RdrName
+mkTyConDecl name details
+  = TyConDecl { tycon_name    = name
+              , tycon_details = details
+              , tycon_doc     = Nothing
+              }
 
 mkGadtDecl :: [Located RdrName]
            -> LHsType RdrName     -- Always a HsForAllTy

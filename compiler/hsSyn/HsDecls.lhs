@@ -16,7 +16,7 @@ module HsDecls (
   HsDecl(..), LHsDecl, HsDataDefn(..),
   -- ** Class or type declarations
   TyClDecl(..), LTyClDecl, TyClGroup,
-  isClassDecl, isDataDecl, isSynDecl, tcdName,
+  isClassDecl, isDataDecl, isKindDecl, isSynDecl, tcdName,
   isFamilyDecl, isTypeFamilyDecl, isDataFamilyDecl,
   tyFamInstDeclName, tyFamInstDeclLName,
   countTyClDecls, pprTyClDeclFlavour,
@@ -49,6 +49,8 @@ module HsDecls (
   -- ** Data-constructor declarations
   ConDecl(..), LConDecl, ResType(..), 
   HsConDeclDetails, hsConDeclArgTys, 
+  TyConDecl(..), LTyConDecl,
+  HsTyConDeclDetails,
   -- ** Document comments
   DocDecl(..), LDocDecl, docDeclDoc,
   -- ** Deprecations
@@ -455,6 +457,12 @@ data TyClDecl name
              , tcdDataDefn :: HsDataDefn name
              , tcdFVs      :: NameSet }
 
+  | -- | @data kind@ declaration
+    KindDecl { tcdLName    :: Located name
+             , tcdKVars    :: [Located name]
+             , tcdTypeCons :: [LTyConDecl name]
+             , tcdFvs      :: NameSet }
+
   | ClassDecl { tcdCtxt    :: LHsContext name,          -- ^ Context...
                 tcdLName   :: Located name,             -- ^ Name of the class
                 tcdTyVars  :: LHsTyVarBndrs name,       -- ^ Class type variables
@@ -492,6 +500,10 @@ Simple classifiers
 isDataDecl :: TyClDecl name -> Bool
 isDataDecl (DataDecl {}) = True
 isDataDecl _other        = False
+
+isKindDecl :: TyClDecl name -> Bool
+isKindDecl (KindDecl {}) = True
+isKindDecl _             = False
 
 -- | type or type instance declaration
 isSynDecl :: TyClDecl name -> Bool
@@ -550,6 +562,7 @@ tyClDeclTyVars d = tcdTyVars d
 \begin{code}
 countTyClDecls :: [TyClDecl name] -> (Int, Int, Int, Int, Int)
         -- class, synonym decls, data, newtype, family decls
+        -- we don't count `data kind` decls here
 countTyClDecls decls 
  = (count isClassDecl    decls,
     count isSynDecl      decls,  -- excluding...
@@ -579,6 +592,9 @@ instance OutputableBndr name
 
     ppr (DataDecl { tcdLName = ltycon, tcdTyVars = tyvars, tcdDataDefn = defn })
       = pp_data_defn (pp_vanilla_decl_head ltycon tyvars) defn
+
+    ppr (KindDecl { tcdLName = lkcon, tcdKVars = kvars, tcdTypeCons = cons })
+      = pp_kind_decl lkcon kvars cons
 
     ppr (ClassDecl {tcdCtxt = context, tcdLName = lclas, tcdTyVars = tyvars, 
                     tcdFDs  = fds,
@@ -633,6 +649,7 @@ pprTyClDeclFlavour (FamDecl {})    = ptext (sLit "family")
 pprTyClDeclFlavour (SynDecl {})    = ptext (sLit "type")
 pprTyClDeclFlavour (DataDecl { tcdDataDefn = (HsDataDefn { dd_ND = nd }) })
   = ppr nd
+pprTyClDeclFlavour (KindDecl {})    = ptext (sLit "data kind")
 pprTyClDeclFlavour (ForeignType {}) = ptext (sLit "foreign type")
 \end{code}
 
@@ -746,6 +763,28 @@ data ConDecl name
         -- need to report decprecated use
     } deriving (Data, Typeable)
 
+type LTyConDecl name = Located (TyConDecl name)
+
+type HsTyConDeclDetails name = HsConDetails (LHsKind name) ()
+
+-- | The type constructor for the right hand side of a @data kind@ declaration.
+data TyConDecl name
+  = TyConDecl
+    { tycon_name    :: Located name            -- ^ name of type constructor
+    , tycon_details :: HsTyConDeclDetails name -- ^ argument kinds
+    , tycon_doc     :: Maybe LHsDocString      -- ^ optional documentation
+    } deriving (Data, Typeable)
+
+instance OutputableBndr name => Outputable (TyConDecl name) where
+  ppr TyConDecl { tycon_name = name, tycon_details = details
+                , tycon_doc = doc }
+    = sep [ppr_mbDoc doc, ppr_details]
+    where
+    ppr_details = case details of
+      InfixCon l r   -> hsep [ppr l, pprInfixOcc (unLoc name), ppr r]
+      PrefixCon args -> hsep (pprPrefixOcc (unLoc name) : map (pprParendHsType .  unLoc) args)
+      RecCon _       -> panic "Outputtable (TyConDecl name)" "unexpected record constructor"
+
 type HsConDeclDetails name = HsConDetails (LBangType name) [ConDeclField name]
 
 hsConDeclArgTys :: HsConDeclDetails name -> [LBangType name]
@@ -767,6 +806,14 @@ instance Outputable ty => Outputable (ResType ty) where
 
 
 \begin{code}
+
+pp_kind_decl :: OutputableBndr name
+             => Located name -> [Located name] -> [LTyConDecl name] -> SDoc
+pp_kind_decl kname kvars cons
+  = ptext (sLit "data kind") <+> ppr (unLoc kname)
+    <+> hsep (map (ppr . unLoc) kvars)
+    <+> equals <+> sep (punctuate (ptext (sLit " |")) (map ppr cons))
+
 pp_data_defn :: OutputableBndr name
                   => (HsContext name -> SDoc)   -- Printing the header
                   -> HsDataDefn name
