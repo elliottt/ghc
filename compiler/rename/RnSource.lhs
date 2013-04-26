@@ -996,6 +996,7 @@ rnTySyn doc rhs = rnLHsType doc rhs
 
 rnDataDefn :: HsDocContext -> HsDataDefn RdrName -> RnM (HsDataDefn Name, FreeVars)
 rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                           , dd_try_promote = prom
                            , dd_ctxt = context, dd_cons = condecls 
                            , dd_kindSig = sig, dd_derivs = derivs })
   = do  { checkTc (h98_style || null (unLoc context)) 
@@ -1019,6 +1020,7 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
         ; let all_fvs = fvs1 `plusFV` fvs3 `plusFV`
                         con_fvs `plusFV` sig_fvs
         ; return ( HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                              , dd_try_promote = prom
                               , dd_ctxt = context', dd_kindSig = sig'
                               , dd_cons = condecls', dd_derivs = derivs' }
                  , all_fvs )

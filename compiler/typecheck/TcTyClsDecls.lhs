@@ -688,6 +688,7 @@ tcDataDefn :: RecTyInfo -> Name
   -- NB: not used for newtype/data instances (whether associated or not)
 tcDataDefn rec_info tc_name tvs kind
          (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                     , dd_try_promote = try_promote
                      , dd_ctxt = ctxt, dd_kindSig = mb_ksig
                      , dd_cons = cons })
   = do { extra_tvs <- tcDataKindSig kind
@@ -718,7 +719,7 @@ tcDataDefn rec_info tc_name tvs kind
                                     mkNewTyConRhs tc_name tycon (head data_cons)
              ; return (buildAlgTyCon tc_name final_tvs cType stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
-                                     (rti_promotable rec_info)
+                                     (try_promote && rti_promotable rec_info)
                                      (not h98_syntax) NoParentTyCon) }
        ; return [ATyCon tycon] }
 \end{code}

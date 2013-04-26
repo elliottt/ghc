@@ -655,6 +655,10 @@ data HsDataDefn name   -- The payload of a data type defn
     HsDataDefn { dd_ND     :: NewOrData,
                  dd_ctxt   :: LHsContext name,           -- ^ Context
                  dd_cType  :: Maybe CType,
+                 dd_try_promote :: Bool,
+                 -- ^ This boolean determines whether we should try to promote
+                 -- the type.  Even if it's True, the type may still not be
+                 -- promotable.
                  dd_kindSig:: Maybe (LHsKind name),
                      -- ^ Optional kind signature.
                      --
@@ -768,15 +772,19 @@ pp_data_defn :: OutputableBndr name
                   -> HsDataDefn name
                   -> SDoc 
 pp_data_defn pp_hdr (HsDataDefn { dd_ND = new_or_data, dd_ctxt = L _ context
+                                , dd_try_promote = try_promote
                                 , dd_kindSig = mb_sig 
                                 , dd_cons = condecls, dd_derivs = derivings })
   | null condecls
-  = ppr new_or_data <+> pp_hdr context <+> pp_sig
+  = ppr new_or_data <+> pp_prom <+> pp_hdr context <+> pp_sig
 
   | otherwise
-  = hang (ppr new_or_data <+> pp_hdr context <+> pp_sig)
+  = hang (ppr new_or_data <+> pp_prom <+> pp_hdr context <+> pp_sig)
        2 (pp_condecls condecls $$ pp_derivings)
   where
+    pp_prom | try_promote = empty
+            | otherwise   = ptext (sLit "type")
+
     pp_sig = case mb_sig of
                Nothing   -> empty
                Just kind -> dcolon <+> ppr kind

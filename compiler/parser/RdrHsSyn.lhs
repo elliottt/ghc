@@ -124,16 +124,17 @@ mkClassDecl loc (L _ (mcxt, tycl_hdr)) fds where_cls
 
 mkTyData :: SrcSpan
          -> NewOrData
+         -> Bool
          -> Maybe CType
          -> Located (Maybe (LHsContext RdrName), LHsType RdrName)
          -> Maybe (LHsKind RdrName)
          -> [LConDecl RdrName]
          -> Maybe [LHsType RdrName]
          -> P (LTyClDecl RdrName)
-mkTyData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
+mkTyData loc new_or_data promotable cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
   = do { (tc, tparams) <- checkTyClHdr tycl_hdr
        ; tyvars <- checkTyVars tycl_hdr tparams
-       ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
+       ; defn <- mkDataDefn new_or_data promotable cType mcxt ksig data_cons maybe_deriv
        ; return (L loc (DataDecl { tcdLName = tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
                                    tcdFVs = placeHolderNames })) }
@@ -148,21 +149,25 @@ mkFamInstData :: SrcSpan
          -> P (LDataFamInstDecl RdrName)
 mkFamInstData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
   = do { (tc, tparams) <- checkTyClHdr tycl_hdr
-       ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
+         -- promotable is always false here, as data families aren't currently
+         -- promotable
+       ; defn <- mkDataDefn new_or_data False cType mcxt ksig data_cons maybe_deriv
        ; return (L loc (DataFamInstDecl { dfid_tycon = tc, dfid_pats = mkHsWithBndrs tparams
                                         , dfid_defn = defn, dfid_fvs = placeHolderNames })) }
 
 mkDataDefn :: NewOrData
+           -> Bool
            -> Maybe CType
            -> Maybe (LHsContext RdrName)
            -> Maybe (LHsKind RdrName)
            -> [LConDecl RdrName]
            -> Maybe [LHsType RdrName]
            -> P (HsDataDefn RdrName)
-mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
+mkDataDefn new_or_data promotable cType mcxt ksig data_cons maybe_deriv
   = do { checkDatatypeContext mcxt
        ; let cxt = fromMaybe (noLoc []) mcxt
        ; return (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                            , dd_try_promote = promotable
                             , dd_ctxt = cxt 
                             , dd_cons = data_cons
                             , dd_kindSig = ksig

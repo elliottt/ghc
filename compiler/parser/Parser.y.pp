@@ -643,18 +643,18 @@ ty_decl :: { LTyClDecl RdrName }
                       ; return (L loc (FamDecl decl)) } }
 
           -- ordinary data type or newtype declaration
-        | data_or_newtype capi_ctype tycl_hdr constrs deriving
-                {% mkTyData (comb4 $1 $3 $4 $5) (unLoc $1) $2 $3 
-                            Nothing (reverse (unLoc $4)) (unLoc $5) }
-                                   -- We need the location on tycl_hdr in case 
+        | data_or_newtype promotable capi_ctype tycl_hdr constrs deriving
+                {% mkTyData (comb4 $1 $4 $5 $6) (unLoc $1) $2 $3 $4
+                            Nothing (reverse (unLoc $5)) (unLoc $6) }
+                                   -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
 
           -- ordinary GADT declaration
-        | data_or_newtype capi_ctype tycl_hdr opt_kind_sig 
+        | data_or_newtype promotable capi_ctype tycl_hdr opt_kind_sig
                  gadt_constrlist
                  deriving
-                {% mkTyData (comb4 $1 $3 $5 $6) (unLoc $1) $2 $3 
-                            (unLoc $4) (unLoc $5) (unLoc $6) }
+                {% mkTyData (comb4 $1 $4 $6 $7) (unLoc $1) $2 $3 $4
+                            (unLoc $5) (unLoc $6) (unLoc $7) }
                                    -- We need the location on tycl_hdr in case 
                                    -- constrs and deriving are both empty
 
@@ -662,6 +662,10 @@ ty_decl :: { LTyClDecl RdrName }
         | 'data' 'family' type opt_kind_sig
                 {% do { L loc decl <- mkFamDecl (comb3 $1 $2 $4) DataFamily $3 (unLoc $4)
                       ; return (L loc (FamDecl decl)) } }
+
+promotable :: { Bool }
+        : 'type'      { False  } -- not promotable
+        |             { True   } -- promotable
 
 inst_decl :: { LInstDecl RdrName }
         : 'instance' inst_type where_inst
