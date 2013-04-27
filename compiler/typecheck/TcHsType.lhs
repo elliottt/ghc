@@ -1484,6 +1484,12 @@ tc_kind_var_app name arg_kis
   = do { thing <- tcLookup name
        ; case thing of
   	   AGlobal (ATyCon tc)
+             -- if this is a kind constructor, e.g. defined by a `data kind`
+             -- declaration, just apply it.
+             | isSuperKind (tyConKind tc)
+             -> return (mkTyConApp tc arg_kis)
+
+             | otherwise
   	     -> do { data_kinds <- xoptM Opt_DataKinds
   	           ; unless data_kinds $ addErr (dataKindsErr name)
   	     	   ; case promotableTyCon_maybe tc of

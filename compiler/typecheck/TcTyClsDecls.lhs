@@ -385,6 +385,15 @@ getInitialKind top_lvl (DataDecl { tcdLName = L _ name, tcdTyVars = ktvs, tcdDat
              -- See Note [Recusion and promoting data constructors]
        ; return (main_pr : inner_prs) }
 
+getInitialKind _top_lvl KindDecl { tcdLName = L _ name, tcdKVars = lkvs, tcdTypeCons = cons } =
+    do cons' <- mapM (initConKind . unLoc) cons
+       --let kind = mkFunTys (replicate (length lkvs) superKind) superKind
+       return ((name,AThing superKind):cons')
+    where
+    initConKind con = do
+      var <- newMetaTyVar TauTv superKind
+      return (unLoc (tycon_name con), AThing (mkTyVarTy var))
+
 getInitialKind _ (ForeignType { tcdLName = L _ name })
   = return [(name, AThing liftedTypeKind)]
 
@@ -468,6 +477,9 @@ kcTyClDecl (DataDecl { tcdLName = L _ name, tcdTyVars = hs_tvs, tcdDataDefn = de
         ; mapM_ (wrapLocM kcConDecl) cons }
 
 kcTyClDecl decl@(SynDecl {}) = pprPanic "kcTyClDecl" (ppr decl)
+
+-- do we need to do any sort checking here?
+kcTyClDecl (KindDecl {}) = return ()
 
 kcTyClDecl (ClassDecl { tcdLName = L _ name, tcdTyVars = hs_tvs
                        , tcdCtxt = ctxt, tcdSigs = sigs })
@@ -586,6 +598,38 @@ tcTyClDecl1 _parent rec_info
   = ASSERT( isNoParent _parent )
     tcTyClTyVars tc_name tvs $ \ tvs' kind ->
     tcDataDefn rec_info tc_name tvs' kind defn
+
+tcTyClDecl1 _parent rec_info
+             KindDecl { tcdLName = L _ kind_name, tcdKVars = lknames
+                      , tcdTypeCons = cons }
+  = ASSERT( isNoParent _parent )
+    do let knames = map unLoc lknames
+       kvars <- mapM (\n -> newSigTyVar n superKind) knames
+
+       (kcon, tycons) <- fixM $ \ ~(kcon,_) ->
+         do let kind = mkTyConApp kcon (mkTyVarTys kvars)
+            tycons <- tcExtendTyVarEnv2 (knames `zip` kvars)
+                (mapM (addLocM (tcTyConDecl kvars kind)) cons)
+
+            -- for now, we assume all kind variables have sort BOX.
+            let arity      = length knames
+                sKind      = superKind --mkFunTys (replicate arity superKind) superKind
+                final_kcon = mkAlgTyCon
+                  kind_name
+                  sKind
+                  kvars
+                  Nothing
+                  []
+                  -- TODO, add references to tycons, defined above in the RHS
+                  (AbstractTyCon True)
+                  NoParentTyCon
+                  (rti_is_rec rec_info kind_name)
+                  False
+                  Nothing
+
+            return (final_kcon, tycons)
+       return (map ATyCon (kcon : tycons))
+
 
 tcTyClDecl1 _parent rec_info
             (ClassDecl { tcdLName = L _ class_name, tcdTyVars = tvs
@@ -1139,6 +1183,28 @@ rejigConRes (tmpl_tvs, res_tmpl) dc_tvs (ResTyGADT res_ty)
                        new_tmpl = updateTyVarKind (substTy subst) tmpl
       | otherwise = pprPanic "tcResultType" (ppr res_ty)
     ex_tvs = dc_tvs `minusList` univ_tvs
+
+
+tcTyConDecl :: [TyVar] -> Kind -> TyConDecl Name -> TcM TyCon
+tcTyConDecl kvars kind TyConDecl { tycon_name = name, tycon_details = details }
+  = do ks <- case details of
+               PrefixCon args -> mapM tcLHsKind args
+               InfixCon l r   -> mapM tcLHsKind [l,r]
+               RecCon {}      -> panic "tcTyConDecl" "unexpected record constructor"
+       let con_kind = mkPiKinds kvars (mkFunTys ks kind)
+       return $ mkAlgTyCon
+         (unLoc name)
+         con_kind
+         []
+         Nothing
+         []
+         (AbstractTyCon True)
+         NoParentTyCon
+         NonRecursive
+         False
+         Nothing
+
+
 \end{code}
 
 Note [Substitution in template variables kinds]
