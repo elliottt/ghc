@@ -14,7 +14,7 @@
 module RnTypes ( 
 	-- Type related stuff
 	rnHsType, rnLHsType, rnLHsTypes, rnContext,
-        rnHsKind, rnLHsKind, rnLHsMaybeKind,
+        rnHsKind, rnLHsKind, rnLHsKinds, rnLHsMaybeKind,
 	rnHsSigType, rnLHsInstType, rnConDeclFields,
         newTyVarNameRn,
 
@@ -309,6 +309,11 @@ rnTyVar is_type rdr_name
 rnLHsTypes :: HsDocContext -> [LHsType RdrName]
            -> RnM ([LHsType Name], FreeVars)
 rnLHsTypes doc tys = mapFvRn (rnLHsType doc) tys
+
+
+rnLHsKinds :: HsDocContext -> [LHsKind RdrName]
+           -> RnM ([LHsKind Name], FreeVars)
+rnLHsKinds doc ks = mapFvRn (rnLHsKind doc) ks
 \end{code}
 
 
