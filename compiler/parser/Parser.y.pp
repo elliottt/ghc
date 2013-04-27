@@ -646,6 +646,9 @@ ty_decl :: { LTyClDecl RdrName }
         | 'data' 'kind' type kconstrs
                 {% mkTyDataKind (comb3 $1 $3 $4) $3 (unLoc $4) }
 
+        | 'data' 'kind' type
+                {% mkTyDataKind (comb2 $1 $3) $3 [] }
+
           -- ordinary data type or newtype declaration
         | data_or_newtype promotable capi_ctype tycl_hdr constrs deriving
                 {% mkTyData (comb4 $1 $4 $5 $6) (unLoc $1) $2 $3 $4

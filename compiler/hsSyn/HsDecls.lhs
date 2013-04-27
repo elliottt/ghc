@@ -811,8 +811,11 @@ pp_kind_decl :: OutputableBndr name
              => Located name -> [Located name] -> [LTyConDecl name] -> SDoc
 pp_kind_decl kname kvars cons
   = ptext (sLit "data kind") <+> ppr (unLoc kname)
-    <+> hsep (map (ppr . unLoc) kvars)
-    <+> equals <+> sep (punctuate (ptext (sLit " |")) (map ppr cons))
+    <+> hsep (map (ppr . unLoc) kvars) <+> rhs
+
+  where
+  rhs | null cons = empty
+      | otherwise = equals <+> sep (punctuate (ptext (sLit " |")) (map ppr cons))
 
 pp_data_defn :: OutputableBndr name
                   => (HsContext name -> SDoc)   -- Printing the header
