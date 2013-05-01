@@ -1484,10 +1484,11 @@ tc_kind_var_app name arg_kis
   = do { thing <- tcLookup name
        ; case thing of
   	   AGlobal (ATyCon tc)
-             -- if this is a kind constructor, e.g. defined by a `data kind`
-             -- declaration, just apply it.
-             | isSuperKind (tyConKind tc)
-             -> return (mkTyConApp tc arg_kis)
+             | let (args,res) = splitFunTys (tyConKind tc)
+             , isSuperKind res
+             -> if length args == length arg_kis
+                   then return (mkTyConApp tc arg_kis)
+                   else tycon_err tc "is not fully applied"
 
              | otherwise
   	     -> do { data_kinds <- xoptM Opt_DataKinds
@@ -1511,7 +1512,7 @@ tc_kind_var_app name arg_kis
              -> return (mkAppTys (mkTyVarTy kind_var) arg_kis)
 
   	   -- It is in scope, but not what we expected
-  	   AThing _ 
+  	   AThing _
              | isTyVarName name 
              -> failWithTc (ptext (sLit "Type variable") <+> quotes (ppr name)
                             <+> ptext (sLit "used in a kind"))

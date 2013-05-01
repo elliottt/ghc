@@ -116,6 +116,24 @@ tcTyAndClassDecls boot_details tyclds_s
              -- remaining groups are typecheck in the extended global env
 
 tcTyClGroup :: ModDetails -> TyClGroup Name -> TcM TcGblEnv
+tcTyClGroup boot_details decls
+  | all (isKindDecl . unLoc) decls
+  = do --cons <- fixM $ \ cons -> do
+         let rec_info = panic "tcTyClGroup" "rec_info"
+             ty_cons  = panic "tcTyClGroup" "ty_cons"
+
+         kind_cons <- mapM (addLocM (mkKindCon rec_info ty_cons)) decls
+         let kind_env  = [ (kind_name, panic "tcTyClGroup" "kind")
+                         | L _ KindDecl { tcdLName = L _ kind_name } <- decls ]
+
+         conss <- tcExtendRecEnv (zipRecTyClss kind_env (map ATyCon kind_cons))
+             (mapM (addLocM (tcKindDecl rec_info)) decls)
+
+         let tycons = [ ATyCon x | x <- kind_cons ++ concat conss ]
+         tcExtendGlobalEnv tycons (tcAddImplicits tycons)
+
+
+
 -- Typecheck one strongly-connected component of type and class decls
 tcTyClGroup boot_details tyclds
   = do {    -- Step 1: kind-check this group and returns the final
@@ -385,14 +403,9 @@ getInitialKind top_lvl (DataDecl { tcdLName = L _ name, tcdTyVars = ktvs, tcdDat
              -- See Note [Recusion and promoting data constructors]
        ; return (main_pr : inner_prs) }
 
-getInitialKind _top_lvl KindDecl { tcdLName = L _ name, tcdKVars = lkvs, tcdTypeCons = cons } =
-    do cons' <- mapM (initConKind . unLoc) cons
-       --let kind = mkFunTys (replicate (length lkvs) superKind) superKind
-       return ((name,AThing superKind):cons')
-    where
-    initConKind con = do
-      var <- newMetaTyVar TauTv superKind
-      return (unLoc (tycon_name con), AThing (mkTyVarTy var))
+getInitialKind _top_lvl KindDecl {}
+  = failWithTc (ptext (sLit "`data kind` declarations can only be recursive")
+            <+> ptext (sLit "with other `data kind` declarations"))
 
 getInitialKind _ (ForeignType { tcdLName = L _ name })
   = return [(name, AThing liftedTypeKind)]
@@ -603,7 +616,8 @@ tcTyClDecl1 _parent rec_info
              KindDecl { tcdLName = L _ kind_name, tcdKVars = lknames
                       , tcdTypeCons = cons }
   = ASSERT( isNoParent _parent )
-    do let knames = map unLoc lknames
+    do traceTc "tcTyClDecl1" (ptext (sLit "checking kind decl") <+> ppr kind_name)
+       let knames = map unLoc lknames
        kvars <- mapM (\n -> newSigTyVar n superKind) knames
 
        (kcon, tycons) <- fixM $ \ ~(kcon,_) ->
@@ -613,7 +627,7 @@ tcTyClDecl1 _parent rec_info
 
             -- for now, we assume all kind variables have sort BOX.
             let arity      = length knames
-                sKind      = superKind --mkFunTys (replicate arity superKind) superKind
+                sKind      = mkFunTys (replicate arity superKind) superKind
                 final_kcon = mkAlgTyCon
                   kind_name
                   sKind
@@ -725,6 +739,45 @@ tcTySynRhs tc_name tvs kind hs_ty
        ; tycon <- buildSynTyCon tc_name tvs (SynonymTyCon rhs_ty)
                                 kind NoParentTyCon
        ; return [ATyCon tycon] }
+
+mkKindCon :: RecTyInfo -> [TyCon] -> TyClDecl Name -> TcM TyCon
+mkKindCon _rec_info _tycons KindDecl { tcdLName  = L _ kind_name
+                                     , tcdKVars  = lknames } =
+  do let knames = map unLoc lknames
+     kvars <- mapM (\n -> newSigTyVar n superKind) knames
+     return $ mkAlgTyCon
+       kind_name
+       sKind
+       kvars
+       Nothing
+       []
+       -- TODO, add references to tycons, defined above in the RHS
+       (AbstractTyCon True)
+       NoParentTyCon
+       -- TODO, make the rec_info work
+       NonRecursive --(rti_is_rec rec_info kind_name)
+       False
+       Nothing
+  where
+  -- for now, we assume all kind variables have sort BOX.
+  sKind = mkFunTys (replicate arity superKind) superKind
+  arity = length lknames
+-- TODO add a fall through case here
+
+tcKindDecl :: RecTyInfo -> TyClDecl Name -> TcM [TyCon]
+tcKindDecl rec_info KindDecl { tcdLName = L _ kind_name, tcdKVars = lknames
+                                  , tcdTypeCons = cons }
+  = do traceTc "tcKindDecl" (ppr kind_name)
+
+       ~(ATyCon kcon) <- tcLookupGlobal kind_name
+       let kvars  = tyConTyVars kcon
+           knames = map unLoc lknames
+           kind   = mkTyConApp kcon (mkTyVarTys kvars)
+       tcExtendTyVarEnv2 (knames `zip` kvars)
+           (mapM (addLocM (tcTyConDecl kvars kind)) cons)
+
+tcKindDecl _ _
+  = panic "tcKindDecl" "unexpected non-KindDecl constructor"
 
 tcDataDefn :: RecTyInfo -> Name
            -> [TyVar] -> Kind
