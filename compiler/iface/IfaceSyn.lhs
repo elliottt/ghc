@@ -16,6 +16,7 @@ module IfaceSyn (
 
         IfaceDecl(..), IfaceClassOp(..), IfaceAT(..), 
         IfaceConDecl(..), IfaceConDecls(..),
+        IfaceTyConDecl(..),
         IfaceExpr(..), IfaceAlt, IfaceLetBndr(..),
         IfaceBinding(..), IfaceConAlt(..),
         IfaceIdInfo(..), IfaceIdDetails(..), IfaceUnfolding(..),
@@ -75,6 +76,12 @@ data IfaceDecl
               ifType      :: IfaceType,
               ifIdDetails :: IfaceIdDetails,
               ifIdInfo    :: IfaceIdInfo }
+
+  | IfaceDataKind { ifName   :: OccName,         -- Kind constructor
+                    ifRec    :: RecFlag,         -- Recursive or not?
+                    ifKVars  :: [IfaceTvBndr],   -- Kind parameters
+                    ifTyCons :: [IfaceTyConDecl] -- Type constructors of this kind
+    }
 
   | IfaceData { ifName       :: OccName,        -- Type constructor
                 ifCType      :: Maybe CType,    -- C type for CAPI FFI
@@ -159,6 +166,12 @@ data IfaceConDecl
 
 data IfaceBang
   = IfNoBang | IfStrict | IfUnpack | IfUnpackCo IfaceCoercion
+
+data IfaceTyConDecl
+  = IfTyCon {
+        ifTyConOcc   :: OccName,    -- constructor name
+        ifTyConArgKs :: [IfaceKind] -- constructor argument kinds
+    }
 
 data IfaceClsInst
   = IfaceClsInst { ifInstCls  :: IfExtName,                -- See comments with
@@ -439,6 +452,9 @@ ifaceDeclImplicitBndrs (IfaceData {ifName = _tc_occ,
           has_wrapper = ifConWrapper con_decl     -- This is the reason for
                                                   -- having the ifConWrapper field!
 
+ifaceDeclImplicitBndrs IfaceDataKind { ifTyCons = cons }
+  = map ifTyConOcc cons
+
 ifaceDeclImplicitBndrs (IfaceClass {ifCtxt = sc_ctxt, ifName = cls_tc_occ,
                                ifSigs = sigs, ifATs = ats })
   = --   (possibly) newtype coercion
@@ -507,6 +523,15 @@ pprIfaceDecl (IfaceSyn {ifName = tycon, ifTyVars = tyvars,
   = hang (ptext (sLit "type family") <+> pprIfaceDeclHead [] tycon tyvars)
        4 (dcolon <+> ppr kind)
 
+pprIfaceDecl IfaceDataKind {ifName = kcon, ifKVars = kvars,
+                            ifTyCons = tycons }
+  = hang (ptext (sLit "data kind") <+> pprIfaceDeclHead [] kcon kvars) 4 $
+    if null tycons
+       then empty
+       else equals <+> sep (punctuate (ptext (sLit " |")) (map pprIfaceTyConDecl tycons))
+
+
+
 pprIfaceDecl (IfaceData {ifName = tycon, ifCType = cType,
                          ifCtxt = context,
                          ifTyVars = tyvars, ifCons = condecls,
@@ -569,6 +594,10 @@ pp_condecls _  IfDataFamTyCon      = empty
 pp_condecls tc (IfNewTyCon c)   = equals <+> pprIfaceConDecl tc c
 pp_condecls tc (IfDataTyCon cs) = equals <+> sep (punctuate (ptext (sLit " |"))
                                                             (map (pprIfaceConDecl tc) cs))
+
+pprIfaceTyConDecl :: IfaceTyConDecl -> SDoc
+pprIfaceTyConDecl IfTyCon { ifTyConOcc = name, ifTyConArgKs = kinds }
+  = hsep (parenSymOcc name (ppr name) : map pprParendIfaceType kinds)
 
 mkIfaceEqPred :: IfaceType -> IfaceType -> IfacePredType
 -- IA0_NOTE: This is wrong, but only used for pretty-printing.
@@ -794,6 +823,9 @@ freeNamesIfDecl d@IfaceData{} =
   maybe emptyNameSet unitNameSet (ifAxiom d) &&&
   freeNamesIfContext (ifCtxt d) &&&
   freeNamesIfConDecls (ifCons d)
+freeNamesIfDecl d@IfaceDataKind{} =
+  freeNamesIfTvBndrs (ifKVars d) &&&
+  fnList freeNamesIfTyConDecl (ifTyCons d)
 freeNamesIfDecl d@IfaceSyn{} =
   freeNamesIfTvBndrs (ifTyVars d) &&&
   freeNamesIfSynRhs (ifSynRhs d) &&&
@@ -840,6 +872,10 @@ freeNamesIfConDecls :: IfaceConDecls -> NameSet
 freeNamesIfConDecls (IfDataTyCon c) = fnList freeNamesIfConDecl c
 freeNamesIfConDecls (IfNewTyCon c)  = freeNamesIfConDecl c
 freeNamesIfConDecls _               = emptyNameSet
+
+freeNamesIfTyConDecl :: IfaceTyConDecl -> NameSet
+freeNamesIfTyConDecl c =
+  fnList freeNamesIfKind (ifTyConArgKs c)
 
 freeNamesIfConDecl :: IfaceConDecl -> NameSet
 freeNamesIfConDecl c =

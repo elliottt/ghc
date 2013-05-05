@@ -487,6 +487,7 @@ isPromotableTyCon rec_tycons tc
        NewTyCon { data_con = c }    -> ok_con c
        AbstractTyCon {}             -> False
        DataFamilyTyCon {}           -> False
+       DataKindTyCon {}             -> False
 
   where
     ok_kind kind = all isLiftedTypeKind args && isLiftedTypeKind res

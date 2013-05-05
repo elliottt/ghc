@@ -1271,6 +1271,13 @@ instance Binary IfaceDecl where
         put_ bh a2
         put_ bh a3
 
+    put_ bh (IfaceDataKind a1 a2 a3 a4) = do
+        putByte bh 6
+        put_ bh (occNameFS a1)
+        put_ bh a2
+        put_ bh a3
+        put_ bh a4
+
     get bh = do
         h <- getByte bh
         case h of
@@ -1307,11 +1314,18 @@ instance Binary IfaceDecl where
                     a7 <- get bh
                     occ <- return $! mkOccNameFS clsName a2
                     return (IfaceClass a1 occ a3 a4 a5 a6 a7)
-            _ -> do a1 <- get bh
+            5 -> do a1 <- get bh
                     a2 <- get bh
                     a3 <- get bh
                     occ <- return $! mkOccNameFS tcName a1
                     return (IfaceAxiom occ a2 a3)
+            6 -> do a1 <- get bh
+                    a2 <- get bh
+                    a3 <- get bh
+                    a4 <- get bh
+                    occ <- return $! mkOccNameFS tcName a1
+                    return (IfaceDataKind occ a2 a3 a4)
+            _ -> error ("Binary.get(TyClDecl): Unknown tag " ++ show h)
 
 instance Binary IfaceAxBranch where
     put_ bh (IfaceAxBranch a1 a2 a3) = do
@@ -1416,6 +1430,16 @@ instance Binary IfaceConDecl where
         a9 <- get bh
         a10 <- get bh
         return (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10)
+
+instance Binary IfaceTyConDecl where
+  put_ bh (IfTyCon a1 a2) = do
+    put_ bh (occNameFS a1)
+    put_ bh a2
+  get bh = do
+    a1 <- get bh
+    a2 <- get bh
+    occ <- return $! mkOccNameFS tcName a1
+    return (IfTyCon occ a2)
 
 instance Binary IfaceAT where
     put_ bh (IfaceAT dec defs) = do

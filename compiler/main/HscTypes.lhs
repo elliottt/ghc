@@ -1268,9 +1268,12 @@ implicitTyConThings tc
 
       -- for each data constructor in order,
       --   the contructor, worker, and (possibly) wrapper
-    concatMap (extras_plus . ADataCon) (tyConDataCons tc)
+    concatMap (extras_plus . ADataCon) (tyConDataCons tc) ++
       -- NB. record selectors are *not* implicit, they have fully-fledged
       -- bindings that pass through the compilation pipeline as normal.
+
+      -- type constructors, if this is a 'data kind' declaration.
+    map ATyCon (kConTypeCons tc)
   where
     class_stuff = case tyConClass_maybe tc of
         Nothing -> []

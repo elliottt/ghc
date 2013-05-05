@@ -81,7 +81,12 @@ module TyCon(
         -- * Primitive representations of Types
         PrimRep(..), PrimElemRep(..),
         tyConPrimRep,
-        primRepSizeW, primElemRepSizeB
+        primRepSizeW, primElemRepSizeB,
+
+        -- * Kind Constructors
+        KCon,
+        kConTypeCons, kConTypeCons_maybe,
+
 ) where
 
 #include "HsVersions.h"
@@ -416,6 +421,9 @@ data TyCon
 
   deriving Typeable
 
+-- | Kind constructor (a TyCon that returns kind super kind).
+type KCon = TyCon
+
 -- | Names of the fields in an algebraic record type
 type FieldLabel = Name
 
@@ -488,6 +496,15 @@ data AlgTyConRhs
                              -- Watch out!  If any newtypes become transparent
                              -- again check Trac #1072.
     }
+
+  -- | Constructors for the rhs of a 'data kind' declaration.
+  | DataKindTyCon {
+        data_kind_cons :: [TyCon] -- ^ Type constructors for the RHS of the
+                                  -- 'data kind' declaration.
+                                  --
+                                  -- INVARIANT: These will be all
+                                  -- @AbstractTyCon@, as defined above.
+    }
 \end{code}
 
 Note [AbstractTyCon and type equality]
@@ -504,6 +521,7 @@ visibleDataCons (AbstractTyCon {})            = []
 visibleDataCons DataFamilyTyCon {}            = []
 visibleDataCons (DataTyCon{ data_cons = cs }) = cs
 visibleDataCons (NewTyCon{ data_con = c })    = [c]
+visibleDataCons DataKindTyCon{}               = []
 
 -- ^ Both type classes as well as family instances imply implicit
 -- type constructors.  These implicit type constructors refer to their parent
@@ -1058,6 +1076,7 @@ isDataTyCon (AlgTyCon {algTcRhs = rhs})
         NewTyCon {}        -> False
         DataFamilyTyCon {} -> False
         AbstractTyCon {}   -> False      -- We don't know, so return False
+        DataKindTyCon {}   -> False
 isDataTyCon (TupleTyCon {tyConTupleSort = sort}) = isBoxed (tupleSortBoxity sort)
 isDataTyCon _ = False
 
@@ -1082,6 +1101,7 @@ isDistinctAlgRhs (DataTyCon {})           = True
 isDistinctAlgRhs (DataFamilyTyCon {})     = True
 isDistinctAlgRhs (AbstractTyCon distinct) = distinct
 isDistinctAlgRhs (NewTyCon {})            = False
+isDistinctAlgRhs (DataKindTyCon{})        = True
 
 -- | Is this 'TyCon' that for a @newtype@
 isNewTyCon :: TyCon -> Bool
@@ -1354,6 +1374,14 @@ tyConDataCons_maybe (AlgTyCon {algTcRhs = DataTyCon { data_cons = cons }}) = Jus
 tyConDataCons_maybe (AlgTyCon {algTcRhs = NewTyCon { data_con = con }})    = Just [con]
 tyConDataCons_maybe (TupleTyCon {dataCon = con})                           = Just [con]
 tyConDataCons_maybe _                                                      = Nothing
+
+
+kConTypeCons :: KCon -> [TyCon]
+kConTypeCons kcon = kConTypeCons_maybe kcon `orElse` []
+
+kConTypeCons_maybe :: KCon -> Maybe [TyCon]
+kConTypeCons_maybe AlgTyCon { algTcRhs = DataKindTyCon cons } = Just cons
+kConTypeCons_maybe _                                          = Nothing
 
 -- | Determine the number of value constructors a 'TyCon' has. Panics if the 'TyCon'
 -- is not algebraic or a tuple

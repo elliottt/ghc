@@ -118,19 +118,20 @@ tcTyAndClassDecls boot_details tyclds_s
 tcTyClGroup :: ModDetails -> TyClGroup Name -> TcM TcGblEnv
 tcTyClGroup boot_details decls
   | all (isKindDecl . unLoc) decls
-  = do --cons <- fixM $ \ cons -> do
+  = do (kcons, _) <- fixM $ \ ~(_, conss) -> do
          let rec_info = panic "tcTyClGroup" "rec_info"
-             ty_cons  = panic "tcTyClGroup" "ty_cons"
 
-         kind_cons <- mapM (addLocM (mkKindCon rec_info ty_cons)) decls
+         kind_cons <- zipWithM (\ix d -> addLocM (mkKindCon rec_info (conss !! ix)) d) [0 ..] decls
          let kind_env  = [ (kind_name, panic "tcTyClGroup" "kind")
                          | L _ KindDecl { tcdLName = L _ kind_name } <- decls ]
 
-         conss <- tcExtendRecEnv (zipRecTyClss kind_env (map ATyCon kind_cons))
+         final_conss <- tcExtendRecEnv (zipRecTyClss kind_env (map ATyCon kind_cons))
              (mapM (addLocM (tcKindDecl rec_info)) decls)
 
-         let tycons = [ ATyCon x | x <- kind_cons ++ concat conss ]
-         tcExtendGlobalEnv tycons (tcAddImplicits tycons)
+         return (kind_cons, final_conss)
+
+       let tycons = [ ATyCon x | x <- kcons ]
+       tcExtendGlobalEnv tycons (tcAddImplicits tycons)
 
 
 
@@ -612,38 +613,8 @@ tcTyClDecl1 _parent rec_info
     tcTyClTyVars tc_name tvs $ \ tvs' kind ->
     tcDataDefn rec_info tc_name tvs' kind defn
 
-tcTyClDecl1 _parent rec_info
-             KindDecl { tcdLName = L _ kind_name, tcdKVars = lknames
-                      , tcdTypeCons = cons }
-  = ASSERT( isNoParent _parent )
-    do traceTc "tcTyClDecl1" (ptext (sLit "checking kind decl") <+> ppr kind_name)
-       let knames = map unLoc lknames
-       kvars <- mapM (\n -> newSigTyVar n superKind) knames
-
-       (kcon, tycons) <- fixM $ \ ~(kcon,_) ->
-         do let kind = mkTyConApp kcon (mkTyVarTys kvars)
-            tycons <- tcExtendTyVarEnv2 (knames `zip` kvars)
-                (mapM (addLocM (tcTyConDecl kvars kind)) cons)
-
-            -- for now, we assume all kind variables have sort BOX.
-            let arity      = length knames
-                sKind      = mkFunTys (replicate arity superKind) superKind
-                final_kcon = mkAlgTyCon
-                  kind_name
-                  sKind
-                  kvars
-                  Nothing
-                  []
-                  -- TODO, add references to tycons, defined above in the RHS
-                  (AbstractTyCon True)
-                  NoParentTyCon
-                  (rti_is_rec rec_info kind_name)
-                  False
-                  Nothing
-
-            return (final_kcon, tycons)
-       return (map ATyCon (kcon : tycons))
-
+tcTyClDecl1 _parent _rec_info KindDecl {}
+  = failWithTc (ptext (sLit "'data kind' declarations can not appear in a recursive group"))
 
 tcTyClDecl1 _parent rec_info
             (ClassDecl { tcdLName = L _ class_name, tcdTyVars = tvs
@@ -741,7 +712,7 @@ tcTySynRhs tc_name tvs kind hs_ty
        ; return [ATyCon tycon] }
 
 mkKindCon :: RecTyInfo -> [TyCon] -> TyClDecl Name -> TcM TyCon
-mkKindCon _rec_info _tycons KindDecl { tcdLName  = L _ kind_name
+mkKindCon _rec_info tycons KindDecl { tcdLName  = L _ kind_name
                                      , tcdKVars  = lknames } =
   do let knames = map unLoc lknames
      kvars <- mapM (\n -> newSigTyVar n superKind) knames
@@ -752,7 +723,7 @@ mkKindCon _rec_info _tycons KindDecl { tcdLName  = L _ kind_name
        Nothing
        []
        -- TODO, add references to tycons, defined above in the RHS
-       (AbstractTyCon True)
+       (DataKindTyCon tycons)
        NoParentTyCon
        -- TODO, make the rec_info work
        NonRecursive --(rti_is_rec rec_info kind_name)
@@ -762,7 +733,9 @@ mkKindCon _rec_info _tycons KindDecl { tcdLName  = L _ kind_name
   -- for now, we assume all kind variables have sort BOX.
   sKind = mkFunTys (replicate arity superKind) superKind
   arity = length lknames
--- TODO add a fall through case here
+
+mkKindCon _ _ _ =
+  panic "mkKindCon" "non 'data kind' declaration"
 
 tcKindDecl :: RecTyInfo -> TyClDecl Name -> TcM [TyCon]
 tcKindDecl rec_info KindDecl { tcdLName = L _ kind_name, tcdKVars = lknames

@@ -46,7 +46,7 @@ import DataCon
 import PrelNames
 import TysWiredIn
 import TysPrim          ( superKindTyConName )
-import BasicTypes       ( Arity, strongLoopBreaker )
+import BasicTypes       ( Arity, strongLoopBreaker, RecFlag (NonRecursive) )
 import Literal
 import qualified Var
 import VarEnv
@@ -435,6 +435,29 @@ tc_iface_decl _ ignore_prags (IfaceId {ifName = occ_name, ifType = iface_type,
         ; info <- tcIdInfo ignore_prags name ty info
         ; return (AnId (mkGlobalId details name ty info)) }
 
+tc_iface_decl _ _ IfaceDataKind {ifName = occ_name,
+                                 ifRec  = is_rec,
+                                 ifKVars = kvs,
+                                 ifTyCons = cons}
+  = bindIfaceTyVars_AT kvs $ \ kvs' ->
+    do kc_name <- lookupIfaceTop occ_name
+       kcon <- fixM $ \ kcon ->
+         do let kind = mkTyConApp kcon (mkTyVarTys kvs')
+            cons <- mapM (tcIfaceTyConDecl kind) cons
+            let sKind = mkFunTys (map Var.tyVarKind kvs') superKind
+            return $ mkAlgTyCon
+               kc_name
+               sKind
+               kvs'
+               Nothing
+               []
+               (DataKindTyCon cons)
+               NoParentTyCon
+               is_rec
+               False
+               Nothing
+       return (ATyCon kcon)
+
 tc_iface_decl parent _ (IfaceData {ifName = occ_name, 
                           ifCType = cType, 
                           ifTyVars = tv_bndrs, 
@@ -614,6 +637,23 @@ tcIfaceDataCons tycon_name tycon _ if_cons
     tc_strict IfUnpack = return (HsUnpack Nothing)
     tc_strict (IfUnpackCo if_co) = do { co <- tcIfaceCo if_co
                                       ; return (HsUnpack (Just co)) }
+
+tcIfaceTyConDecl :: Kind -> IfaceTyConDecl -> IfL TyCon
+tcIfaceTyConDecl kind IfTyCon { ifTyConOcc = occ_name, ifTyConArgKs = args }
+  = do name  <- lookupIfaceTop occ_name
+       kinds <- mapM tcIfaceKind args
+       return $ mkAlgTyCon
+         name
+         (mkFunTys kinds kind)
+         []
+         Nothing
+         []
+         (AbstractTyCon True)
+         NoParentTyCon
+         NonRecursive
+         False
+         Nothing
+
 
 tcIfaceEqSpec :: [(OccName, IfaceType)] -> IfL [(TyVar, Type)]
 tcIfaceEqSpec spec

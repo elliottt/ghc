@@ -1472,6 +1472,12 @@ tyConToIfaceDecl env tycon
                 ifSynRhs  = to_ifsyn_rhs syn_rhs,
                 ifSynKind = tidyToIfaceType env1 (synTyConResKind tycon) }
 
+  | DataKindTyCon cons <- algTyConRhs tycon
+  = IfaceDataKind { ifName   = getOccName tycon
+                  , ifRec    = boolToRecFlag (isRecursiveTyCon tycon)
+                  , ifKVars  = toIfaceTvBndrs tyvars
+                  , ifTyCons = map ifaceTyConDecl cons }
+
   | isAlgTyCon tycon
   = IfaceData { ifName    = getOccName tycon,
                 ifCType   = tyConCType tycon,
@@ -1502,6 +1508,7 @@ tyConToIfaceDecl env tycon
         -- Furthermore, tyThingToIfaceDecl is also used
         -- in TcRnDriver for GHCi, when browsing a module, in which case the
         -- AbstractTyCon case is perfectly sensible.
+    ifaceConDecls DataKindTyCon{}                   = pprPanic "ifaceConDecls" (ptext (sLit "unexpected 'data kind' rhs"))
 
     ifaceConDecl data_con 
         = IfCon   { ifConOcc     = getOccName (dataConName data_con),
@@ -1524,6 +1531,12 @@ tyConToIfaceDecl env tycon
           (env2, ex_tvs')   = tidyTyVarBndrs env1 ex_tvs
           to_eq_spec spec = [ (getOccName (tidyTyVar env2 tv), tidyToIfaceType env2 ty) 
                             | (tv,ty) <- spec]
+
+    ifaceTyConDecl ty_con
+        = IfTyCon { ifTyConOcc   = getOccName (tyConName ty_con),
+                    ifTyConArgKs = map (tidyToIfaceType emptyTidyEnv) args }
+        where
+          (args,_) = splitFunTys (tyConKind ty_con)
 
 toIfaceBang :: TidyEnv -> HsBang -> IfaceBang
 toIfaceBang _    HsNoBang            = IfNoBang
