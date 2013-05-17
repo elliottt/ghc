@@ -46,7 +46,7 @@ import DataCon
 import PrelNames
 import TysWiredIn
 import TysPrim          ( superKindTyConName )
-import BasicTypes       ( Arity, strongLoopBreaker, RecFlag (NonRecursive) )
+import BasicTypes       ( Arity, strongLoopBreaker )
 import Literal
 import qualified Var
 import VarEnv
@@ -642,17 +642,8 @@ tcIfaceTyConDecl :: Kind -> IfaceTyConDecl -> IfL TyCon
 tcIfaceTyConDecl kind IfTyCon { ifTyConOcc = occ_name, ifTyConArgKs = args }
   = do name  <- lookupIfaceTop occ_name
        kinds <- mapM tcIfaceKind args
-       return $ mkAlgTyCon
-         name
-         (mkFunTys kinds kind)
-         []
-         Nothing
-         []
-         (AbstractTyCon True)
-         NoParentTyCon
-         NonRecursive
-         False
-         Nothing
+       let (kcon,_) = splitTyConApp kind
+       return (mkDataKindTyCon kcon name (mkFunTys kinds kind))
 
 
 tcIfaceEqSpec :: [(OccName, IfaceType)] -> IfL [(TyVar, Type)]

@@ -1217,18 +1217,9 @@ tcTyConDecl kvars kind TyConDecl { tycon_name = name, tycon_details = details }
                PrefixCon args -> mapM tcLHsKind args
                InfixCon l r   -> mapM tcLHsKind [l,r]
                RecCon {}      -> panic "tcTyConDecl" "unexpected record constructor"
-       let con_kind = mkPiKinds kvars (mkFunTys ks kind)
-       return $ mkAlgTyCon
-         (unLoc name)
-         con_kind
-         []
-         Nothing
-         []
-         (AbstractTyCon True)
-         NoParentTyCon
-         NonRecursive
-         False
-         Nothing
+       let (kcon,_) = splitTyConApp kind
+           con_kind = mkPiKinds kvars (mkFunTys ks kind)
+       return (mkDataKindTyCon kcon (unLoc name) con_kind)
 
 
 \end{code}

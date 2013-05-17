@@ -27,6 +27,7 @@ module TyCon(
         mkForeignTyCon,
         mkPromotedDataCon,
         mkPromotedTyCon,
+        mkDataKindTyCon,
 
         -- ** Predicates on TyCons
         isAlgTyCon,
@@ -38,8 +39,9 @@ module TyCon(
         isDecomposableTyCon,
         isForeignTyCon, 
         isPromotedDataCon, isPromotedTyCon,
-        isPromotedDataCon_maybe, isPromotedTyCon_maybe,
+        isPromotedTyCon_maybe,
         promotableTyCon_maybe, promoteTyCon,
+        promotedDataConParent,
 
         isInjectiveTyCon,
         isDataTyCon, isProductTyCon, isDataProductTyCon_maybe,
@@ -92,7 +94,7 @@ module TyCon(
 #include "HsVersions.h"
 
 import {-# SOURCE #-} TypeRep ( Kind, Type, PredType )
-import {-# SOURCE #-} DataCon ( DataCon, isVanillaDataCon )
+import {-# SOURCE #-} DataCon ( DataCon, isVanillaDataCon, dataConTyCon )
 
 import Var
 import Class
@@ -407,7 +409,10 @@ data TyCon
         tyConName   :: Name,   -- ^ Same Name as the data constructor
         tyConArity  :: Arity,
         tc_kind     :: Kind,   -- ^ Translated type of the data constructor
-        dataCon     :: DataCon -- ^ Corresponding data constructor
+        parentTyCon :: TyCon   -- ^ Corresponding parent type constructor.  For
+                               --   real promoted data cons, this is the type
+                               --   definition.  For data kind definitions, this is the
+                               --   kind definition.
     }
 
   -- | Represents promoted type constructor.
@@ -1007,7 +1012,19 @@ mkPromotedDataCon con name unique kind arity
         tyConUnique = unique,
         tyConArity  = arity,
         tc_kind     = kind,
-        dataCon     = con
+        parentTyCon = dataConTyCon con
+  }
+
+-- | Construct a type constructor for a type introduced by a 'data kind'
+-- declaration.
+mkDataKindTyCon :: TyCon -> Name -> Kind -> TyCon
+mkDataKindTyCon kc name kind
+  = PromotedDataCon {
+        tyConName   = name,
+        tyConUnique = nameUnique name,
+        tyConArity  = 0,
+        tc_kind     = kind,
+        parentTyCon = kc
   }
 
 -- | Create a promoted type constructor 'TyCon'
@@ -1283,10 +1300,11 @@ isPromotedDataCon :: TyCon -> Bool
 isPromotedDataCon (PromotedDataCon {}) = True
 isPromotedDataCon _                    = False
 
--- | Retrieves the promoted DataCon if this is a PromotedDataCon;
-isPromotedDataCon_maybe :: TyCon -> Maybe DataCon
-isPromotedDataCon_maybe (PromotedDataCon { dataCon = dc }) = Just dc
-isPromotedDataCon_maybe _ = Nothing
+-- | Returns the TyCon for the parent when this is a normal data type,
+--   and the TyCon for the kind definition if this is a 'data kind' definition.
+promotedDataConParent :: TyCon -> Maybe TyCon
+promotedDataConParent PromotedDataCon { parentTyCon = tc } = Just tc
+promotedDataConParent _                                    = Nothing
 
 -- | Identifies implicit tycons that, in particular, do not go into interface
 -- files (because they are implicitly reconstructed when the interface is
