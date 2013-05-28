@@ -104,7 +104,7 @@ vectTyConDecl tycon name'
                     []                      -- no stupid theta
                     rhs'                    -- new constructor defs
                     rec_flag                -- whether recursive
-                    False                   -- Not promotable
+                    NotPromotable
                     gadt_flag               -- whether in GADT syntax
                     NoParentTyCon           
        }

@@ -143,10 +143,16 @@ tcTyClGroup boot_details tyclds
          names_w_poly_kinds <- kcTyClGroup tyclds
        ; traceTc "tcTyAndCl generalized kinds" (ppr names_w_poly_kinds)
 
+
+            -- If any of the data declarations are explicitly not promotable,
+            -- the whole group is not promotable.
+       ; let dont_promote = or [ not (dd_try_promote dd)
+                               | DataDecl { tcdDataDefn = dd } <- map unLoc tyclds ]
+
             -- Step 2: type-check all groups together, returning
             -- the final TyCons and Classes
        ; tyclss <- fixM $ \ rec_tyclss -> do
-           { let rec_flags = calcRecFlags boot_details rec_tyclss
+           { let rec_flags = calcRecFlags dont_promote boot_details rec_tyclss
 
                  -- Populate environment with knot-tied ATyCon for TyCons
                  -- NB: if the decls mention any ill-staged data cons
@@ -694,7 +700,7 @@ tcFamDecl1 parent
   ; let final_tvs = tvs' ++ extra_tvs    -- we may not need these
         tycon = buildAlgTyCon tc_name final_tvs Nothing []
                               DataFamilyTyCon Recursive
-                              False   -- Not promotable to the kind level
+                              NotPromotable
                               True    -- GADT syntax
                               parent
   ; return [ATyCon tycon] }
@@ -727,7 +733,7 @@ mkKindCon _rec_info tycons KindDecl { tcdLName  = L _ kind_name
        -- TODO, make the rec_info work
        NonRecursive --(rti_is_rec rec_info kind_name)
        False
-       Nothing
+       NotPromotable
   where
   -- for now, we assume all kind variables have sort BOX.
   sKind = mkFunTys (replicate arity superKind) superKind
@@ -786,9 +792,13 @@ tcDataDefn rec_info tc_name tvs kind
                    DataType -> return (mkDataTyConRhs data_cons)
                    NewType  -> ASSERT( not (null data_cons) )
                                     mkNewTyConRhs tc_name tycon (head data_cons)
+             ; let prom_info
+                     | not try_promote         = NeverPromote
+                     | rti_promotable rec_info = Promotable ()
+                     | otherwise               = NotPromotable
              ; return (buildAlgTyCon tc_name final_tvs cType stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
-                                     (try_promote && rti_promotable rec_info)
+                                     prom_info
                                      (not h98_syntax) NoParentTyCon) }
        ; return [ATyCon tycon] }
 \end{code}

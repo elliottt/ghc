@@ -1000,13 +1000,13 @@ buildAlgTyCon :: Name
 	      -> ThetaType	       -- ^ Stupid theta
 	      -> AlgTyConRhs
 	      -> RecFlag
-	      -> Bool		       -- ^ True <=> this TyCon is promotable
+              -> PromotionFlavor ()
 	      -> Bool		       -- ^ True <=> was declared in GADT syntax
               -> TyConParent
 	      -> TyCon
 
 buildAlgTyCon tc_name ktvs cType stupid_theta rhs 
-              is_rec is_promotable gadt_syn parent
+              is_rec prom_flavor gadt_syn parent
   = tc
   where 
     kind = mkPiKinds ktvs liftedTypeKind
@@ -1014,11 +1014,10 @@ buildAlgTyCon tc_name ktvs cType stupid_theta rhs
     -- tc and mb_promoted_tc are mutually recursive
     tc = mkAlgTyCon tc_name kind ktvs cType stupid_theta 
                     rhs parent is_rec gadt_syn 
-                    mb_promoted_tc
+                    promotion_info
 
-    mb_promoted_tc
-      | is_promotable = Just (mkPromotedTyCon tc (promoteKind kind))
-      | otherwise     = Nothing
+    promotion_info =
+      fmap (\ _ -> mkPromotedTyCon tc (promoteKind kind)) prom_flavor
 \end{code}
 
 

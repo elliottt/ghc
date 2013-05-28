@@ -1327,6 +1327,19 @@ instance Binary IfaceDecl where
                     return (IfaceDataKind occ a2 a3 a4)
             _ -> error ("Binary.get(TyClDecl): Unknown tag " ++ show h)
 
+instance Binary (PromotionFlavor ()) where
+  put_ bh p = case p of
+    NeverPromote  -> putByte bh 0x0
+    NotPromotable -> putByte bh 0x1
+    Promotable () -> putByte bh 0x2
+  get bh = do
+    tag <- getByte bh
+    case tag of
+      0x0 -> return NeverPromote
+      0x1 -> return NotPromotable
+      0x2 -> return (Promotable ())
+      _   -> error ("Binary.get(Promotable ()): Unknown tag " ++ show tag)
+
 instance Binary IfaceAxBranch where
     put_ bh (IfaceAxBranch a1 a2 a3) = do
         put_ bh a1

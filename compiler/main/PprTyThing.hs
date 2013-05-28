@@ -127,6 +127,7 @@ pprTyConHdr pefas tyCon
     opt_modifier
       | GHC.isFamilyTyCon tyCon = ptext (sLit "family")
       | isJust (kConTypeCons_maybe tyCon) = ptext (sLit "kind")
+      | NeverPromote <- promotableTyConInfo tyCon = ptext (sLit "type")
       | otherwise             = empty
 
     opt_stupid 	-- The "stupid theta" part of the declaration

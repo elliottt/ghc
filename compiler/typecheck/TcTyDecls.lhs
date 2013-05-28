@@ -353,11 +353,11 @@ compiled, plus the outer structure of directly-mentioned types.
 data RecTyInfo = RTI { rti_promotable :: Bool
                      , rti_is_rec     :: Name -> RecFlag }
 
-calcRecFlags :: ModDetails -> [TyThing] -> RecTyInfo
+calcRecFlags :: Bool -> ModDetails -> [TyThing] -> RecTyInfo
 -- The 'boot_names' are the things declared in M.hi-boot, if M is the current module.
 -- Any type constructors in boot_names are automatically considered loop breakers
-calcRecFlags boot_details tyclss
-  = RTI { rti_promotable = is_promotable
+calcRecFlags prevent_promotion boot_details tyclss
+  = RTI { rti_promotable = not prevent_promotion && is_promotable
         , rti_is_rec     = is_rec }
   where
     rec_tycon_names = mkNameSet (map tyConName all_tycons)

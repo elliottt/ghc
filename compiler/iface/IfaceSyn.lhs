@@ -37,7 +37,7 @@ module IfaceSyn (
 
 #include "HsVersions.h"
 
-import TyCon( SynTyConRhs(..) )
+import TyCon( SynTyConRhs(..), PromotionFlavor(..) )
 import IfaceType
 import CoreSyn( DFunArg, dfunArgExprs )
 import PprCore()            -- Printing DFunArgs
@@ -89,7 +89,7 @@ data IfaceDecl
                 ifCtxt       :: IfaceContext,   -- The "stupid theta"
                 ifCons       :: IfaceConDecls,  -- Includes new/data/data family info
                 ifRec        :: RecFlag,        -- Recursive or not?
-                ifPromotable :: Bool,           -- Promotable to kind level?
+                ifPromotable :: PromotionFlavor (),-- Promotable to kind level?
                 ifGadtSyntax :: Bool,           -- True <=> declared using
                                                 -- GADT syntax
                 ifAxiom      :: Maybe IfExtName -- The axiom, for a newtype, 
@@ -543,8 +543,11 @@ pprIfaceDecl (IfaceData {ifName = tycon, ifCType = cType,
                , pp_condecls tycon condecls
                , pprAxiom mbAxiom])
   where
-    pp_prom | is_prom   = ptext (sLit "Promotable")
-            | otherwise = ptext (sLit "Not promotable")
+    pp_prom = case is_prom of
+      NeverPromote  -> ptext (sLit "Never promotable")
+      NotPromotable -> ptext (sLit "Not promotable")
+      Promotable () -> ptext (sLit "Promotable")
+
     pp_nd = case condecls of
                 IfAbstractTyCon dis -> ptext (sLit "abstract") <> parens (ppr dis)
                 IfDataFamTyCon     -> ptext (sLit "data family")

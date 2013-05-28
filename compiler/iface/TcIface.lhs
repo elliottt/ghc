@@ -455,7 +455,7 @@ tc_iface_decl _ _ IfaceDataKind {ifName = occ_name,
                NoParentTyCon
                is_rec
                False
-               Nothing
+               NotPromotable
        return (ATyCon kcon)
 
 tc_iface_decl parent _ (IfaceData {ifName = occ_name, 

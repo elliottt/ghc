@@ -1486,7 +1486,7 @@ tyConToIfaceDecl env tycon
                 ifCons    = ifaceConDecls (algTyConRhs tycon),
                 ifRec     = boolToRecFlag (isRecursiveTyCon tycon),
                 ifGadtSyntax = isGadtSyntaxTyCon tycon,
-                ifPromotable = isJust (promotableTyCon_maybe tycon),
+                ifPromotable = fmap (\_ -> ()) (promotableTyConInfo tycon),
                 ifAxiom   = fmap coAxiomName (tyConFamilyCoercion_maybe tycon) }
 
   | isForeignTyCon tycon
