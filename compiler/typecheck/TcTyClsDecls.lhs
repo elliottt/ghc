@@ -722,7 +722,6 @@ mkKindCon _rec_info tycons KindDecl { tcdLName  = L _ kind_name
        kvars
        Nothing
        []
-       -- TODO, add references to tycons, defined above in the RHS
        (DataKindTyCon tycons)
        NoParentTyCon
        -- TODO, make the rec_info work
