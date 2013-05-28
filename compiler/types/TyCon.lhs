@@ -73,6 +73,7 @@ module TyCon(
         algTyConRhs,
         newTyConRhs, newTyConEtadRhs, unwrapNewTyCon_maybe,
         tupleTyConBoxity, tupleTyConSort, tupleTyConArity,
+        tyConDataKind_maybe, isTyConDataKind,
 
         -- ** Manipulating TyCons
         tcExpandTyCon_maybe, coreExpandTyCon_maybe,
@@ -1226,6 +1227,15 @@ tyConAssoc_maybe :: TyCon -> Maybe Class
 tyConAssoc_maybe tc = case tyConParent tc of
                         AssocFamilyTyCon cls -> Just cls
                         _                    -> Nothing
+
+-- | Is this TyCon defined as part of the RHS of a 'data kind' declaration?
+isTyConDataKind :: TyCon -> Bool
+isTyConDataKind tc = isJust (tyConDataKind_maybe tc)
+
+tyConDataKind_maybe :: TyCon -> Maybe TyCon
+tyConDataKind_maybe tc = case tc of
+  PromotedDataCon { parentTyCon = s@AlgTyCon { algTcRhs = DataKindTyCon {} } } -> Just s
+  _                                                                            -> Nothing
 
 -- The unit tycon didn't used to be classed as a tuple tycon
 -- but I thought that was silly so I've undone it

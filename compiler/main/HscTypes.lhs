@@ -1307,9 +1307,13 @@ isImplicitTyThing (ACoAxiom ax) = isImplicitCoAxiom ax
 -- might have a parent.
 tyThingParent_maybe :: TyThing -> Maybe TyThing
 tyThingParent_maybe (ADataCon dc) = Just (ATyCon (dataConTyCon dc))
-tyThingParent_maybe (ATyCon tc)   = case tyConAssoc_maybe tc of
-                                      Just cls -> Just (ATyCon (classTyCon cls))
-                                      Nothing  -> Nothing
+tyThingParent_maybe (ATyCon tc)
+  | Just cls <- tyConAssoc_maybe tc
+  = Just (ATyCon (classTyCon cls))
+  | Just s <- tyConDataKind_maybe tc
+  = Just (ATyCon s)
+  | otherwise
+  = Nothing
 tyThingParent_maybe (AnId id)     = case idDetails id of
                                          RecSelId { sel_tycon = tc } -> Just (ATyCon tc)
                                          ClassOpId cls               -> Just (ATyCon (classTyCon cls))
