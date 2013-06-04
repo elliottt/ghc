@@ -443,7 +443,7 @@ tc_iface_decl _ _ IfaceDataKind {ifName = occ_name,
     do kc_name <- lookupIfaceTop occ_name
        kcon <- fixM $ \ kcon ->
          do let kind = mkTyConApp kcon (mkTyVarTys kvs')
-            cons <- mapM (tcIfaceTyConDecl kind) cons
+            cons <- mapM (tcIfaceTyConDecl kind kcon) cons
             let sKind = mkFunTys (map Var.tyVarKind kvs') superKind
             return $ mkAlgTyCon
                kc_name
@@ -638,12 +638,14 @@ tcIfaceDataCons tycon_name tycon _ if_cons
     tc_strict (IfUnpackCo if_co) = do { co <- tcIfaceCo if_co
                                       ; return (HsUnpack (Just co)) }
 
-tcIfaceTyConDecl :: Kind -> IfaceTyConDecl -> IfL TyCon
-tcIfaceTyConDecl kind IfTyCon { ifTyConOcc = occ_name, ifTyConArgKs = args }
+tcIfaceTyConDecl :: Kind -> KCon -> IfaceTyConDecl -> IfL TyCon
+tcIfaceTyConDecl kind kcon IfTyCon { ifTyConOcc = occ_name, ifTyConArgKs = args }
   = do name  <- lookupIfaceTop occ_name
-       kinds <- mapM tcIfaceKind args
-       let (kcon,_) = splitTyConApp kind
+       -- See the comment in tc_con_decl of tcIfaceDataCons for why forkM
+       kinds <- forkM pp_name (mapM tcIfaceKind args)
        return (mkDataKindTyCon kcon name (mkFunTys kinds kind))
+  where
+  pp_name = ptext (sLit "Type constructor") <+> ppr occ_name
 
 
 tcIfaceEqSpec :: [(OccName, IfaceType)] -> IfL [(TyVar, Type)]
