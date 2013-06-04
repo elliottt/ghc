@@ -400,17 +400,17 @@ has_args ((L _ (Match args _ _)) : _) = not (null args)
 -- This function splits up the type application, adds any pending
 -- arguments, and converts the type constructor back into a data constructor.
 
-splitCon :: LHsType RdrName
+splitCon :: Bool -> LHsType RdrName
       -> P (Located RdrName, HsConDeclDetails RdrName)
 -- This gets given a "type" that should look like
 --      C Int Bool
 -- or   C { x::Int, y::Bool }
 -- and returns the pieces
-splitCon ty
+splitCon changeNamespace ty
  = split ty []
  where
    split (L _ (HsAppTy t u)) ts    = split t (u : ts)
-   split (L l (HsTyVar tc))  ts    = do data_con <- tyConToDataCon l tc
+   split (L l (HsTyVar tc))  ts    = do data_con <- tyConToDataCon changeNamespace l tc
                                         return (data_con, mk_rest ts)
    split (L l (HsTupleTy _ [])) [] = return (L l (getRdrName unitDataCon), PrefixCon [])
                                          -- See Note [Unit tuples] in HsTypes
@@ -434,7 +434,7 @@ mkDeprecatedGadtRecordDecl :: SrcSpan
 --    C { x,y ::Int } :: T a b
 -- We give it a RecCon details right away
 mkDeprecatedGadtRecordDecl loc (L con_loc con) flds res_ty
-  = do { data_con <- tyConToDataCon con_loc con
+  = do { data_con <- tyConToDataCon True con_loc con
        ; return (L loc (ConDecl { con_old_rec  = True
                                 , con_name     = data_con
                                 , con_explicit = Implicit
@@ -492,10 +492,10 @@ mkGadtDecl names (L _ (HsForAllTy imp qvars cxt tau))
                  , con_doc      = Nothing }
 mkGadtDecl _ other_ty = pprPanic "mkGadtDecl" (ppr other_ty)
 
-tyConToDataCon :: SrcSpan -> RdrName -> P (Located RdrName)
-tyConToDataCon loc tc
+tyConToDataCon :: Bool -> SrcSpan -> RdrName -> P (Located RdrName)
+tyConToDataCon changeNamespace loc tc
   | isTcOcc (rdrNameOcc tc)
-  = return (L loc (setRdrNameSpace tc srcDataName))
+  = return (L loc newName)
   | otherwise
   = parseErrorSDoc loc (msg $$ extra)
   where
@@ -503,6 +503,12 @@ tyConToDataCon loc tc
     extra | tc == forall_tv_RDR
           = text "Perhaps you intended to use -XExistentialQuantification"
           | otherwise = empty
+
+   -- for ordinary data declarations, we change the namespace of the data
+   -- constructor, but for data kind declarations, we leave them in the type
+   -- namespace
+    newName | changeNamespace = setRdrNameSpace tc srcDataName
+            | otherwise       = tc
 \end{code}
 
 Note [Sorting out the result type]

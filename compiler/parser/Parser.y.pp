@@ -1298,7 +1298,7 @@ constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
 --      C t1 t2 :% D Int
 -- in which case C really would be a type constructor.  We can't resolve this
 -- ambiguity till we come across the constructor oprerator :% (or not, more usually)
-        : btype                         {% splitCon $1 >>= return.LL }
+        : btype                         {% splitCon True $1 >>= return.LL }
         | btype conop btype             {  LL ($2, InfixCon $1 $3) }
 
 fielddecls :: { [ConDeclField RdrName] }
@@ -1346,8 +1346,9 @@ kconstr :: { LTyConDecl RdrName }
 
 kconstr_stuff :: { Located (Located RdrName, HsTyConDeclDetails RdrName) }
           -- we reuse splitCon here because types and kinds are represented in
-          -- the same way
-        : bkind                 {% splitCon $1 >>= \ (con,details) ->
+          -- the same way, except that we don't change the constructor
+          -- namespace.
+        : bkind                 {% splitCon False $1 >>= \ (con,details) ->
                                   toTyConDetails (getLoc $1) details >>= \ kdetails ->
                                   return (LL (con,kdetails))
                                 }
