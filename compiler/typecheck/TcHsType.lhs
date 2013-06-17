@@ -45,7 +45,6 @@ import {-# SOURCE #-}	TcSplice( tcSpliceType )
 #endif
 
 import HsSyn
-import TcHsSyn ( zonkTcTypeToType, emptyZonkEnv )
 import TcRnMonad
 import TcEvidence( HsWrapper )
 import TcEnv
@@ -55,8 +54,8 @@ import TcUnify
 import TcIface
 import TcType
 import Type
+import TypeRep( Type(..) )  -- For the mkNakedXXX stuff
 import Kind
-import TypeRep( mkNakedTyConApp )
 import Var
 import VarSet
 import TyCon
@@ -185,18 +184,30 @@ tcHsSigTypeNC ctxt (L loc hs_ty)
         ; ty <- tcCheckHsTypeAndGen hs_ty kind
 
           -- Zonk to expose kind information to checkValidType
-        ; ty <- zonkTcType ty
+        ; ty <- zonkSigType ty
         ; checkValidType ctxt ty
         ; return ty }
 
 -----------------
 tcHsInstHead :: UserTypeCtxt -> LHsType Name -> TcM ([TyVar], ThetaType, Class, [Type])
 -- Like tcHsSigTypeNC, but for an instance head.
-tcHsInstHead ctxt lhs_ty@(L loc hs_ty)
+tcHsInstHead user_ctxt lhs_ty@(L loc hs_ty)
   = setSrcSpan loc $    -- The "In the type..." context comes from the caller
-    do { ty <- tcCheckHsTypeAndGen hs_ty constraintKind
-       ; ty <- zonkTcType ty
-       ; checkValidInstance ctxt lhs_ty ty }
+    do { inst_ty <- tc_inst_head hs_ty
+       ; kvs     <- zonkTcTypeAndFV inst_ty
+       ; kvs     <- kindGeneralize kvs
+       ; inst_ty <- zonkSigType (mkForAllTys kvs inst_ty)
+       ; checkValidInstance user_ctxt lhs_ty inst_ty }
+
+tc_inst_head :: HsType Name -> TcM TcType
+tc_inst_head (HsForAllTy _ hs_tvs hs_ctxt hs_ty)
+  = tcHsTyVarBndrs hs_tvs $ \ tvs -> 
+    do { ctxt <- tcHsContext hs_ctxt
+       ; ty   <- tc_lhs_type hs_ty ekConstraint    -- Body for forall has kind Constraint
+       ; return (mkSigmaTy tvs ctxt ty) }
+
+tc_inst_head hs_ty
+  = tc_hs_type hs_ty ekConstraint
 
 -----------------
 tcHsDeriv :: HsType Name -> TcM ([TyVar], Class, [Type])
@@ -207,7 +218,7 @@ tcHsDeriv hs_ty
                  -- Funny newtype deriving form
                  -- 	forall a. C [a]
                  -- where C has arity 2. Hence any-kinded result
-       ; ty   <- zonkTcType ty
+       ; ty   <- zonkSigType ty
        ; let (tvs, pred) = splitForAllTys ty
        ; case getClassPredTys_maybe pred of
            Just (cls, tys) -> return (tvs, cls, tys)
@@ -243,7 +254,7 @@ tcClassSigType :: LHsType Name -> TcM Type
 tcClassSigType lhs_ty@(L _ hs_ty)
   = addTypeCtxt lhs_ty $
     do { ty <- tcCheckHsTypeAndGen hs_ty liftedTypeKind
-       ; zonkTcTypeToType emptyZonkEnv ty }
+       ; zonkSigType ty }
 
 tcHsConArgType :: NewOrData ->  LHsType Name -> TcM Type
 -- Permit a bang, but discard it
@@ -293,7 +304,10 @@ tcCheckHsTypeAndGen :: HsType Name -> Kind -> TcM Type
 -- The result is not necessarily zonked, and has not been checked for validity
 tcCheckHsTypeAndGen hs_ty kind
   = do { ty  <- tc_hs_type hs_ty (EK kind expectedKindMsg)
-       ; kvs <- kindGeneralize (tyVarsOfType ty) []
+       ; traceTc "tcCheckHsTypeAndGen" (ppr hs_ty)
+       ; traceTc "tcCheckHsTypeAndGen" (ppr ty)
+       ; kvs <- zonkTcTypeAndFV ty 
+       ; kvs <- kindGeneralize kvs
        ; return (mkForAllTys kvs ty) }
 \end{code}
 
@@ -363,25 +377,34 @@ tc_hs_type hs_ty@(HsOpTy ty1 (_, l_op@(L _ op)) ty2) exp_kind
          -- mkNakedAppTys: see Note [Zonking inside the knot]
 
 tc_hs_type hs_ty@(HsAppTy ty1 ty2) exp_kind
-  | L _ (HsTyVar fun) <- fun_ty
-  , fun `hasKey` funTyConKey
-  , [fty1,fty2] <- arg_tys
-  = tc_fun_type hs_ty fty1 fty2 exp_kind
-  | otherwise
+--  | L _ (HsTyVar fun) <- fun_ty
+--  , fun `hasKey` funTyConKey
+--  , [fty1,fty2] <- arg_tys
+--  = tc_fun_type hs_ty fty1 fty2 exp_kind
+--  | otherwise
   = do { (fun_ty', fun_kind) <- tc_infer_lhs_type fun_ty
        ; arg_tys' <- tcCheckApps hs_ty fun_ty fun_kind arg_tys exp_kind
        ; return (mkNakedAppTys fun_ty' arg_tys') }
          -- mkNakedAppTys: see Note [Zonking inside the knot]
+         -- This looks fragile; how do we *know* that fun_ty isn't 
+         -- a TyConApp, say (which is never supposed to appear in the
+         -- function position of an AppTy)?
   where
     (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
 
 --------- Foralls
-tc_hs_type (HsForAllTy _ hs_tvs context ty) exp_kind
+tc_hs_type hs_ty@(HsForAllTy _ hs_tvs context ty) exp_kind
   = tcHsTyVarBndrs hs_tvs $ \ tvs' -> 
     -- Do not kind-generalise here!  See Note [Kind generalisation]
     do { ctxt' <- tcHsContext context
-       ; ty'   <- tc_lhs_type ty exp_kind
-           -- Why exp_kind?  See Note [Body kind of forall]
+       ; ty' <- if null (unLoc context) then  -- Plain forall, no context
+                   tc_lhs_type ty exp_kind    -- Why exp_kind?  See Note [Body kind of forall]
+                else     
+                   -- If there is a context, then this forall is really a
+                   -- _function_, so the kind of the result really is *
+                   -- The body kind (result of the function can be * or #, hence ekOpen
+                   do { checkExpectedKind hs_ty liftedTypeKind exp_kind
+                      ; tc_lhs_type ty ekOpen }
        ; return (mkSigmaTy tvs' ctxt' ty') }
 
 --------- Lists, arrays, and tuples
@@ -680,10 +703,76 @@ can't change it.  So we must traverse the type.
 BUT the parent TyCon is knot-tied, so we can't look at it yet. 
 
 So we must be careful not to use "smart constructors" for types that
-look at the TyCon or Class involved.  Hence the use of mkNakedXXX
-functions.
+look at the TyCon or Class involved.  
 
-This is sadly delicate.
+  * Hence the use of mkNakedXXX functions. These do *not* enforce 
+    the invariants (for example that we use (FunTy s t) rather 
+    than (TyConApp (->) [s,t])).  
+
+  * Ditto in zonkTcType (which may be applied more than once, eg to
+    squeeze out kind meta-variables), we are careful not to look at
+    the TyCon.
+
+  * We arrange to call zonkSigType *once* right at the end, and it
+    does establish the invariants.  But in exchange we can't look
+    at the result (not even its structure) until we have emerged
+    from the "knot".
+
+  * TcHsSyn.zonkTcTypeToType also can safely check/establish
+    invariants.
+
+This is horribly delicate.  I hate it.  A good example of how
+delicate it is can be seen in Trac #7903.
+
+\begin{code}
+mkNakedTyConApp :: TyCon -> [Type] -> Type
+-- Builds a TyConApp 
+--   * without being strict in TyCon,
+--   * without satisfying the invariants of TyConApp
+-- A subsequent zonking will establish the invariants
+mkNakedTyConApp tc tys = TyConApp tc tys
+
+mkNakedAppTys :: Type -> [Type] -> Type
+mkNakedAppTys ty1                []   = ty1
+mkNakedAppTys (TyConApp tc tys1) tys2 = mkNakedTyConApp tc (tys1 ++ tys2)
+mkNakedAppTys ty1                tys2 = foldl AppTy ty1 tys2
+
+zonkSigType :: TcType -> TcM TcType
+-- Zonk the result of type-checking a user-written type signature
+-- It may have kind varaibles in it, but no meta type variables
+-- Because of knot-typing (see Note [Zonking inside the knot])
+-- it may need to establish the Type invariants; 
+-- hence the use of mkTyConApp and mkAppTy
+zonkSigType ty
+  = go ty
+  where
+    go (TyConApp tc tys) = do tys' <- mapM go tys
+                              return (mkTyConApp tc tys')
+                -- Key point: establish Type invariants! 
+                -- See Note [Zonking inside the knot] 
+
+    go (LitTy n)         = return (LitTy n)
+
+    go (FunTy arg res)   = do arg' <- go arg
+                              res' <- go res
+                              return (FunTy arg' res')
+
+    go (AppTy fun arg)   = do fun' <- go fun
+                              arg' <- go arg
+                              return (mkAppTy fun' arg')
+		-- NB the mkAppTy; we might have instantiated a
+		-- type variable to a type constructor, so we need
+		-- to pull the TyConApp to the top.
+
+	-- The two interesting cases!
+    go (TyVarTy tyvar) | isTcTyVar tyvar = zonkTcTyVar tyvar
+		       | otherwise	 = TyVarTy <$> updateTyVarKindM go tyvar
+		-- Ordinary (non Tc) tyvars occur inside quantified types
+
+    go (ForAllTy tv ty) = do { tv' <- zonkTcTyVarBndr tv
+                             ; ty' <- go ty
+                             ; return (ForAllTy tv' ty') }
+\end{code}
 
 Note [Body kind of a forall]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -878,22 +967,25 @@ kcHsTyVarBndrs full_kind_sig (HsQTvs { hsq_kvs = kv_ns, hsq_tvs = hs_tvs }) thin
                Just thing       -> pprPanic "check_in_scope" (ppr thing)
            ; return (n, kind) }
 
-tcScopedKindVars :: [Name] -> TcM a -> TcM a
--- Given some tyvar binders like [a (b :: k -> *) (c :: k)]
--- bind each scoped kind variable (k in this case) to a fresh
--- kind skolem variable
-tcScopedKindVars kv_ns thing_inside 
-  = tcExtendTyVarEnv (map mkKindSigVar kv_ns) thing_inside
-
 tcHsTyVarBndrs :: LHsTyVarBndrs Name 
 	       -> ([TcTyVar] -> TcM r)
 	       -> TcM r
--- Bind the type variables to skolems, each with a meta-kind variable kind
-tcHsTyVarBndrs (HsQTvs { hsq_kvs = kvs, hsq_tvs = hs_tvs }) thing_inside
-  = tcScopedKindVars kvs $
-    do { tvs <- mapM tcHsTyVarBndr hs_tvs
-       ; traceTc "tcHsTyVarBndrs" (ppr hs_tvs $$ ppr tvs)
-       ; tcExtendTyVarEnv tvs (thing_inside tvs) }
+-- Bind the kind variables to fresh skolem variables
+-- and type variables to skolems, each with a meta-kind variable kind
+tcHsTyVarBndrs (HsQTvs { hsq_kvs = kv_ns, hsq_tvs = hs_tvs }) thing_inside
+  = do { let kvs = map mkKindSigVar kv_ns
+       ; tcExtendTyVarEnv kvs $ do 
+       { tvs <- mapM tcHsTyVarBndr hs_tvs
+       ; traceTc "tcHsTyVarBndrs {" (vcat [ text "Hs kind vars:" <+> ppr kv_ns
+                                        , text "Hs type vars:" <+> ppr hs_tvs
+                                        , text "Kind vars:" <+> ppr kvs
+                                        , text "Type vars:" <+> ppr tvs ])
+       ; res <- tcExtendTyVarEnv tvs (thing_inside (kvs ++ tvs))
+       ; traceTc "tcHsTyVarBndrs }" (vcat [ text "Hs kind vars:" <+> ppr kv_ns
+                                        , text "Hs type vars:" <+> ppr hs_tvs
+                                        , text "Kind vars:" <+> ppr kvs
+                                        , text "Type vars:" <+> ppr tvs ])
+       ; return res  } }
 
 tcHsTyVarBndr :: LHsTyVarBndr Name -> TcM TcTyVar
 -- Return a type variable 
@@ -920,11 +1012,10 @@ tcHsTyVarBndr (L _ hs_tv)
        ; return (mkTcTyVar name kind (SkolemTv False)) } } }
 
 ------------------
-kindGeneralize :: TyVarSet -> [Name] -> TcM [KindVar]
-kindGeneralize tkvs _names_to_avoid
+kindGeneralize :: TyVarSet -> TcM [KindVar]
+kindGeneralize tkvs
   = do { gbl_tvs <- tcGetGlobalTyVars -- Already zonked
-       ; tkvs    <- zonkTyVarsAndFV tkvs
-       ; let kvs_to_quantify = filter isKindVar (varSetElems (tkvs `minusVarSet` gbl_tvs))
+       ; quantifyTyVars gbl_tvs (filterVarSet isKindVar tkvs) }
                 -- ToDo: remove the (filter isKindVar)
                 -- Any type variables in tkvs will be in scope,
                 -- and hence in gbl_tvs, so after removing gbl_tvs
@@ -935,17 +1026,6 @@ kindGeneralize tkvs _names_to_avoid
                 -- When typechecking the body of the bracket, we typecheck $t to a
                 -- unification variable 'alpha', with no biding forall.  We don't
                 -- want to kind-quantify it!
-
-       ; traceTc "kindGeneralise" (vcat [ppr kvs_to_quantify])
-       ; ASSERT2 (all isKindVar kvs_to_quantify, ppr kvs_to_quantify $$ ppr tkvs)
-             -- This assertion is obviosly true because of the filter isKindVar
-             -- but we'll remove that when reorganising TH, and then the assertion
-             -- will mean something
-
-             -- If we tidied the kind variables, which should all be mutable,
-             -- this 'zonkQuantifiedTyVars' update the original TyVar to point to
-             -- the tided and skolemised one
-         zonkQuantifiedTyVars kvs_to_quantify }
 \end{code}
 
 Note [Kind generalisation]
@@ -1165,7 +1245,7 @@ tcHsPatSigType ctxt (HsWB { hswb_cts = hs_ty, hswb_kvs = sig_kvs, hswb_tvs = sig
         ; let ktv_binds = (sig_kvs `zip` kvs) ++ (sig_tvs `zip` tvs)
 	; sig_ty <- tcExtendTyVarEnv2 ktv_binds $
                     tcHsLiftedType hs_ty
-        ; sig_ty <- zonkTcType sig_ty
+        ; sig_ty <- zonkSigType sig_ty
 	; checkValidType ctxt sig_ty 
 	; return (sig_ty, ktv_binds) }
   where

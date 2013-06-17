@@ -37,7 +37,7 @@ module BasicTypes(
 	WarningTxt(..),
 
 	Fixity(..), FixityDirection(..),
-	defaultFixity, maxPrecedence, 
+	defaultFixity, maxPrecedence, minPrecedence,
 	negateFixity, funTyFixity,
 	compareFixity,
 
@@ -251,8 +251,10 @@ instance Outputable FixityDirection where
     ppr InfixN = ptext (sLit "infix")
 
 ------------------------
-maxPrecedence :: Int
+maxPrecedence, minPrecedence :: Int
 maxPrecedence = 9
+minPrecedence = 0
+
 defaultFixity :: Fixity
 defaultFixity = Fixity maxPrecedence InfixL
 
@@ -686,7 +688,8 @@ data InlineSpec   -- What the user's INLINE pragama looked like
   = Inline
   | Inlinable
   | NoInline
-  | EmptyInlineSpec
+  | EmptyInlineSpec  -- Used in a place-holder InlinePragma in SpecPrag or IdInfo,
+                     -- where there isn't any real inline pragma at all
   deriving( Eq, Data, Typeable, Show )
 	-- Show needed for Lexer.x
 \end{code}

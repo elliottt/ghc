@@ -617,11 +617,12 @@ punc_RDR                = dataQual_RDR lEX (fsLit "Punc")
 ident_RDR               = dataQual_RDR lEX (fsLit "Ident")
 symbol_RDR              = dataQual_RDR lEX (fsLit "Symbol")
 
-step_RDR, alt_RDR, reset_RDR, prec_RDR :: RdrName
+step_RDR, alt_RDR, reset_RDR, prec_RDR, pfail_RDR :: RdrName
 step_RDR                = varQual_RDR  rEAD_PREC (fsLit "step")
 alt_RDR                 = varQual_RDR  rEAD_PREC (fsLit "+++")
 reset_RDR               = varQual_RDR  rEAD_PREC (fsLit "reset")
 prec_RDR                = varQual_RDR  rEAD_PREC (fsLit "prec")
+pfail_RDR               = varQual_RDR  rEAD_PREC (fsLit "pfail")
 
 showList_RDR, showList___RDR, showsPrec_RDR, showString_RDR,
     showSpace_RDR, showParen_RDR :: RdrName
@@ -797,10 +798,6 @@ stringTyConName         = tcQual  gHC_BASE (fsLit "String") stringTyConKey
 -- The 'inline' function
 inlineIdName :: Name
 inlineIdName            = varQual gHC_MAGIC (fsLit "inline") inlineIdKey
-
--- The 'undefined' function. Used by supercompilation.
-undefinedName :: Name
-undefinedName = varQual gHC_ERR (fsLit "undefined") undefinedKey
 
 -- Base classes (Eq, Ord, Functor)
 fmapName, eqClassName, eqName, ordClassName, geName, functorClassName :: Name
@@ -1690,6 +1687,8 @@ checkDotnetResNameIdKey       = mkPreludeMiscIdUnique 154
 undefinedKey :: Unique
 undefinedKey                  = mkPreludeMiscIdUnique 155
 
+magicSingIKey :: Unique
+magicSingIKey              = mkPreludeMiscIdUnique 156
 \end{code}
 
 Certain class operations from Prelude classes.  They get their own

@@ -901,8 +901,10 @@ typedef struct _RtsSymbolVal {
       SymI_NeedsProto(top_ct)                           \
                                                         \
       SymI_HasProto(ENT_VIA_NODE_ctr)                   \
-      SymI_HasProto(ENT_STATIC_THK_ctr)                 \
-      SymI_HasProto(ENT_DYN_THK_ctr)                    \
+      SymI_HasProto(ENT_STATIC_THK_SINGLE_ctr)          \
+      SymI_HasProto(ENT_STATIC_THK_MANY_ctr)            \
+      SymI_HasProto(ENT_DYN_THK_SINGLE_ctr)             \
+      SymI_HasProto(ENT_DYN_THK_MANY_ctr)               \
       SymI_HasProto(ENT_STATIC_FUN_DIRECT_ctr)          \
       SymI_HasProto(ENT_DYN_FUN_DIRECT_ctr)             \
       SymI_HasProto(ENT_STATIC_CON_ctr)                 \
@@ -970,8 +972,6 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(UPD_NEW_PERM_IND_ctr)               \
       SymI_HasProto(UPD_OLD_IND_ctr)                    \
       SymI_HasProto(UPD_OLD_PERM_IND_ctr)               \
-      SymI_HasProto(UPD_BH_UPDATABLE_ctr)               \
-      SymI_HasProto(UPD_BH_SINGLE_ENTRY_ctr)            \
       SymI_HasProto(UPD_CAF_BH_UPDATABLE_ctr)           \
       SymI_HasProto(UPD_CAF_BH_SINGLE_ENTRY_ctr)        \
       SymI_HasProto(GC_SEL_ABANDONED_ctr)               \
@@ -1067,7 +1067,6 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(addDLL)                                             \
       SymI_HasProto(__int_encodeDouble)                                 \
       SymI_HasProto(__word_encodeDouble)                                \
-      SymI_HasProto(__2Int_encodeDouble)                                \
       SymI_HasProto(__int_encodeFloat)                                  \
       SymI_HasProto(__word_encodeFloat)                                 \
       SymI_HasProto(stg_atomicallyzh)                                   \
@@ -1108,7 +1107,6 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(getOrSetSystemTimerThreadIOManagerThreadStore)      \
       SymI_HasProto(getGCStats)                                         \
       SymI_HasProto(getGCStatsEnabled)                                  \
-      SymI_HasProto(genSymZh)                                           \
       SymI_HasProto(genericRaise)                                       \
       SymI_HasProto(getProgArgv)                                        \
       SymI_HasProto(getFullProgArgv)                                    \
@@ -4957,6 +4955,7 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
                // Generate veneer
                SymbolExtra *extra = makeArmSymbolExtra(oc, ELF_R_SYM(info), S+imm+4, 1, is_target_thm);
                offset = (StgWord32) &extra->jumpIsland - P - 4;
+               sign = offset >> 31;
                to_thm = 1;
             } else if (!is_target_thm && ELF_R_TYPE(info) == R_ARM_THM_CALL) {
                offset &= ~0x3;

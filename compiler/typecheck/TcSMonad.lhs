@@ -81,8 +81,6 @@ module TcSMonad (
     newFlexiTcSTy, instFlexiTcS, instFlexiTcSHelperTcS,
     cloneMetaTyVar,
 
-    compatKind, mkKindErrorCtxtTcS,
-
     Untouchables, isTouchableMetaTyVarTcS, isFilledMetaTyVar_maybe,
     zonkTyVarsAndFV,
 
@@ -110,7 +108,6 @@ import qualified TcRnMonad as TcM
 import qualified TcMType as TcM
 import qualified TcEnv as TcM 
        ( checkWellStaged, topIdLvl, tcGetDefaultTys )
-import {-# SOURCE #-} qualified TcUnify as TcM ( mkKindErrorCtxt )
 import Kind
 import TcType
 import DynFlags
@@ -135,7 +132,6 @@ import TcRnTypes
 import Unique 
 import UniqFM
 import Maybes ( orElse, catMaybes, firstJust )
-import StaticFlags( opt_NoFlatCache )
 
 import Control.Monad( unless, when, zipWithM )
 import Data.IORef
@@ -146,19 +142,6 @@ import StaticFlags( opt_PprStyle_Debug )
 import VarSet
 import Digraph
 #endif
-\end{code}
-
-
-\begin{code}
-compatKind :: Kind -> Kind -> Bool
-compatKind k1 k2 = k1 `tcIsSubKind` k2 || k2 `tcIsSubKind` k1 
-
-mkKindErrorCtxtTcS :: Type -> Kind 
-                   -> Type -> Kind 
-                   -> ErrCtxt
-mkKindErrorCtxtTcS ty1 ki1 ty2 ki2
-  = (False,TcM.mkKindErrorCtxt ty1 ty2 ki1 ki2)
-
 \end{code}
 
 %************************************************************************
@@ -896,18 +879,19 @@ lookupFlatEqn fam_ty
 lookupInInerts :: TcPredType -> TcS (Maybe CtEvidence)
 -- Is this exact predicate type cached in the solved or canonicals of the InertSet
 lookupInInerts pty
-  = do { IS { inert_solved_dicts = solved, inert_cans = ics } <- getTcSInerts
-       ; case lookupSolvedDict solved pty of
+  = do { inerts <- getTcSInerts
+       ; case lookupSolvedDict inerts pty of
            Just ctev -> return (Just ctev)
-           Nothing   -> return (lookupInInertCans ics pty) }
+           Nothing   -> return (lookupInInertCans inerts pty) }
 
-lookupSolvedDict :: PredMap CtEvidence -> TcPredType -> Maybe CtEvidence
+lookupSolvedDict :: InertSet -> TcPredType -> Maybe CtEvidence
 -- Returns just if exactly this predicate type exists in the solved.
-lookupSolvedDict tm pty = lookupTM pty $ unPredMap tm
+lookupSolvedDict (IS { inert_solved_dicts = solved }) pty 
+  = lookupTM pty (unPredMap solved)
 
-lookupInInertCans :: InertCans -> TcPredType -> Maybe CtEvidence
+lookupInInertCans :: InertSet -> TcPredType -> Maybe CtEvidence
 -- Returns Just if exactly this pred type exists in the inert canonicals
-lookupInInertCans ics pty
+lookupInInertCans (IS { inert_cans = ics }) pty
   = case (classifyPredType pty) of
       ClassPred cls _ 
          -> lookupCCanMap cls (\ct -> ctEvPred ct `eqType` pty) (inert_dicts ics)
@@ -1160,6 +1144,7 @@ getTcSInertsRef = TcS (return . tcs_inerts)
 
 getTcSWorkListRef :: TcS (IORef WorkList) 
 getTcSWorkListRef = TcS (return . tcs_worklist) 
+
 getTcSInerts :: TcS InertSet 
 getTcSInerts = getTcSInertsRef >>= wrapTcS . (TcM.readTcRef) 
 
@@ -1380,8 +1365,9 @@ newFlattenSkolem Given fam_ty
        ; let rhs_ty = mkTyVarTy tv
              ctev = CtGiven { ctev_pred = mkTcEqPred fam_ty rhs_ty
                             , ctev_evtm = EvCoercion (mkTcReflCo fam_ty) }
+       ; dflags <- getDynFlags
        ; updInertTcS $ \ is@(IS { inert_fsks = fsks }) -> 
-            extendFlatCache fam_ty ctev rhs_ty
+            extendFlatCache dflags fam_ty ctev rhs_ty
             is { inert_fsks       = tv : fsks }
 
        ; return (ctev, rhs_ty) }
@@ -1391,12 +1377,14 @@ newFlattenSkolem _ fam_ty  -- Wanted or Derived: make new unification variable
        ; ctev <- newWantedEvVarNC (mkTcEqPred fam_ty rhs_ty)
                                    -- NC (no-cache) version because we've already
                                    -- looked in the solved goals an inerts (lookupFlatEqn)
-       ; updInertTcS $ extendFlatCache fam_ty ctev rhs_ty
+       ; dflags <- getDynFlags
+       ; updInertTcS $ extendFlatCache dflags fam_ty ctev rhs_ty
        ; return (ctev, rhs_ty) }
 
-extendFlatCache :: TcType -> CtEvidence -> TcType -> InertSet -> InertSet
-extendFlatCache 
-  | opt_NoFlatCache
+extendFlatCache :: DynFlags -> TcType -> CtEvidence -> TcType
+                -> InertSet -> InertSet
+extendFlatCache dflags
+  | not (gopt Opt_FlatCache dflags)
   = \ _ _ _ is -> is
   | otherwise
   = \ fam_ty ctev rhs_ty is@(IS { inert_flat_cache = fc }) -> 

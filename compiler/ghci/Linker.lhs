@@ -291,15 +291,14 @@ reallyInitDynLinker dflags =
         ; pls <- linkPackages' dflags (preloadPackages (pkgState dflags)) pls0
 
           -- (c) Link libraries from the command-line
-        ; let optl = getOpts dflags opt_l
-        ; let minus_ls = [ lib | '-':'l':lib <- optl ]
+        ; let cmdline_ld_inputs = ldInputs dflags
+        ; let minus_ls = [ lib | Option ('-':'l':lib) <- cmdline_ld_inputs ]
         ; let lib_paths = libraryPaths dflags
         ; libspecs <- mapM (locateLib dflags False lib_paths) minus_ls
 
           -- (d) Link .o files from the command-line
-        ; let cmdline_ld_inputs = ldInputs dflags
-
-        ; classified_ld_inputs <- mapM (classifyLdInput dflags) cmdline_ld_inputs
+        ; classified_ld_inputs <- mapM (classifyLdInput dflags)
+                                    [ f | FileOption _ f <- cmdline_ld_inputs ]
 
           -- (e) Link any MacOS frameworks
         ; let platform = targetPlatform dflags
@@ -1195,7 +1194,7 @@ locateLib dflags is_hs dirs lib
      mk_arch_path     dir = dir </> ("lib" ++ lib <.> "a")
 
      hs_dyn_lib_name = lib ++ "-ghc" ++ cProjectVersion
-     mk_hs_dyn_lib_path dir = dir </> mkSOName platform hs_dyn_lib_name
+     mk_hs_dyn_lib_path dir = dir </> mkHsSOName platform hs_dyn_lib_name
 
      so_name = mkSOName platform lib
      mk_dyn_lib_path dir = dir </> so_name

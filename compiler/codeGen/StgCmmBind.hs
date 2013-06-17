@@ -130,8 +130,7 @@ cgBind (StgNonRec name rhs)
   = do  { (info, fcode) <- cgRhs name rhs
         ; addBindC (cg_id info) info
         ; init <- fcode
-        ; emit init
-        }
+        ; emit init }
         -- init cannot be used in body, so slightly better to sink it eagerly
 
 cgBind (StgRec pairs)
@@ -204,12 +203,38 @@ cgRhs :: Id
                                   -- (see above)
                )
 
-cgRhs name (StgRhsCon cc con args)
-  = buildDynCon name cc con args
+cgRhs id (StgRhsCon cc con args)
+  = withNewTickyCounterThunk False (idName id) $ -- False for "not static"
+    buildDynCon id True cc con args
 
 cgRhs name (StgRhsClosure cc bi fvs upd_flag _srt args body)
+  | null fvs   -- See Note [Nested constant closures]
+  = do { (info, fcode) <- cgTopRhsClosure Recursive name cc bi upd_flag args body 
+       ; return (info, fcode >> return mkNop) }
+  | otherwise 
   = do dflags <- getDynFlags
        mkRhsClosure dflags name cc bi (nonVoidIds fvs) upd_flag args body
+
+{- Note [Nested constant closures]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have
+  f x = let funny = not True 
+        in ...
+then 'funny' is a nested closure (compiled with cgRhs) that has no free vars.
+This does not happen often, because let-floating takes them all to top 
+level; but it CAN happen.  (Reason: let-floating may make a function f smaller
+so it can be inlined, so now (f True) may generate a local no-fv closure.
+This actually happened during bootsrapping GHC itself, with f=mkRdrFunBind 
+in TcGenDeriv.)
+
+If we have one of these things, AND they allocate, the heap check will
+refer to the static funny_closure; but there isn't one! (Why does the
+heap check refer to the static closure? Becuase nodeMustPointToIt is
+False, which is fair enough.)
+
+Simple solution: compile the RHS as if it was top level.  Then
+everything works.  A minor benefit is eliminating the allocation code
+too.  -}
 
 ------------------------------------------------------------------------
 --              Non-constructor right hand sides
@@ -363,7 +388,7 @@ mkRhsClosure _ bndr cc _ fvs upd_flag args body
         ; emit (mkComment $ mkFastString "calling allocDynClosure")
         ; let toVarArg (NonVoid a, off) = (NonVoid (StgVarArg a), off)
         ; let info_tbl = mkCmmInfo closure_info
-        ; hp_plus_n <- allocDynClosure info_tbl lf_info use_cc blame_cc
+        ; hp_plus_n <- allocDynClosure (Just bndr) info_tbl lf_info use_cc blame_cc
                                          (map toVarArg fv_details)
 
         -- RETURN
@@ -381,8 +406,9 @@ cgRhsStdThunk bndr lf_info payload
        ; return (id_info, gen_code reg)
        }
  where
- gen_code reg
-  = do  -- AHA!  A STANDARD-FORM THUNK
+ gen_code reg  -- AHA!  A STANDARD-FORM THUNK
+  = withNewTickyCounterStdThunk False (idName bndr) $ -- False for "not static"
+    do
   {     -- LAY OUT THE OBJECT
     mod_name <- getModuleName
   ; dflags <- getDynFlags
@@ -397,9 +423,11 @@ cgRhsStdThunk bndr lf_info payload
 --  ; (use_cc, blame_cc) <- chooseDynCostCentres cc [{- no args-}] body
   ; let use_cc = curCCS; blame_cc = curCCS
 
+  ; tickyEnterStdThunk closure_info
+
         -- BUILD THE OBJECT
   ; let info_tbl = mkCmmInfo closure_info
-  ; hp_plus_n <- allocDynClosure info_tbl lf_info
+  ; hp_plus_n <- allocDynClosure (Just bndr) info_tbl lf_info
                                    use_cc blame_cc payload_w_offsets
 
         -- RETURN
@@ -448,7 +476,7 @@ closureCodeBody :: Bool            -- whether this is a top-level binding
 
 closureCodeBody top_lvl bndr cl_info cc _args arity body fv_details
   | arity == 0 -- No args i.e. thunk
-  = withNewTickyCounterThunk cl_info $
+  = withNewTickyCounterThunk (isStaticClosure cl_info) (closureName cl_info) $
     emitClosureProcAndInfoTable top_lvl bndr lf_info info_tbl [] $
       \(_, node, _) -> thunkCode cl_info fv_details cc node arity body
    where
@@ -543,8 +571,9 @@ thunkCode cl_info fv_details _cc node arity body
         ; entryHeapCheck cl_info node' arity [] $ do
         { -- Overwrite with black hole if necessary
           -- but *after* the heap-overflow check
+        ; tickyEnterThunk cl_info
         ; when (blackHoleOnEntry cl_info && node_points)
-                (blackHoleIt cl_info node)
+                (blackHoleIt node)
 
           -- Push update frame
         ; setupUpdate cl_info node $
@@ -564,14 +593,14 @@ thunkCode cl_info fv_details _cc node arity body
 --              Update and black-hole wrappers
 ------------------------------------------------------------------------
 
-blackHoleIt :: ClosureInfo -> LocalReg -> FCode ()
+blackHoleIt :: LocalReg -> FCode ()
 -- Only called for closures with no args
 -- Node points to the closure
-blackHoleIt closure_info node
-  = emitBlackHoleCode (closureSingleEntry closure_info) (CmmReg (CmmLocal node))
+blackHoleIt node_reg
+  = emitBlackHoleCode (CmmReg (CmmLocal node_reg))
 
-emitBlackHoleCode :: Bool -> CmmExpr -> FCode ()
-emitBlackHoleCode is_single_entry node = do
+emitBlackHoleCode :: CmmExpr -> FCode ()
+emitBlackHoleCode node = do
   dflags <- getDynFlags
 
   -- Eager blackholing is normally disabled, but can be turned on with
@@ -599,7 +628,6 @@ emitBlackHoleCode is_single_entry node = do
              -- work with profiling.
 
   when eager_blackholing $ do
-    tickyBlackHole (not is_single_entry)
     emitStore (cmmOffsetW dflags node (fixedHdrSize dflags))
                   (CmmReg (CmmGlobal CurrentTSO))
     emitPrimCall [] MO_WriteBarrier []
@@ -610,7 +638,7 @@ setupUpdate :: ClosureInfo -> LocalReg -> FCode () -> FCode ()
         -- so that the cost centre in the original closure can still be
         -- extracted by a subsequent enterCostCentre
 setupUpdate closure_info node body
-  | closureReEntrant closure_info
+  | not (lfUpdatable (closureLFInfo closure_info))
   = body
 
   | not (isStaticClosure closure_info)
@@ -717,7 +745,7 @@ link_caf node _is_upd = do
         blame_cc = use_cc
         tso      = CmmReg (CmmGlobal CurrentTSO)
 
-  ; hp_rel <- allocDynClosureCmm cafBlackHoleInfoTable mkLFBlackHole
+  ; hp_rel <- allocDynClosureCmm Nothing cafBlackHoleInfoTable mkLFBlackHole
                                          use_cc blame_cc [(tso,fixedHdrSize dflags)]
         -- small optimisation: we duplicate the hp_rel expression in
         -- both the newCAF call and the value returned below.

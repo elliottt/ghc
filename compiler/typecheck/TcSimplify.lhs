@@ -23,6 +23,7 @@ import TcMType as TcM
 import TcType 
 import TcSMonad as TcS
 import TcInteract 
+import Kind     ( defaultKind_maybe )
 import Inst
 import FunDeps  ( growThetaTyVars )
 import Type     ( classifyPredType, PredTree(..), getClassPredTys_maybe )
@@ -76,34 +77,53 @@ simplifyTop wanteds
     simpl_top :: WantedConstraints -> TcS WantedConstraints
     simpl_top wanteds
       = do { wc_first_go <- nestTcS (solve_wanteds_and_drop wanteds)
-           ; free_tvs <- TcS.zonkTyVarsAndFV (tyVarsOfWC wc_first_go) 
-           ; let meta_tvs = filterVarSet isMetaTyVar free_tvs
+                            -- This is where the main work happens
+           ; try_tyvar_defaulting wc_first_go }
+
+    try_tyvar_defaulting :: WantedConstraints -> TcS WantedConstraints
+    try_tyvar_defaulting wc
+      | isEmptyWC wc 
+      = return wc
+      | otherwise
+      = do { free_tvs <- TcS.zonkTyVarsAndFV (tyVarsOfWC wc) 
+           ; let meta_tvs = varSetElems (filterVarSet isMetaTyVar free_tvs)
                    -- zonkTyVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi, 
                    -- and we definitely don't want to try to assign to those!
 
-           ; mapM_ defaultTyVar (varSetElems meta_tvs)   -- Has unification side effects
-           ; simpl_top_loop wc_first_go }
+           ; meta_tvs' <- mapM defaultTyVar meta_tvs   -- Has unification side effects
+           ; if meta_tvs' == meta_tvs   -- No defaulting took place;
+                                        -- (defaulting returns fresh vars)
+             then try_class_defaulting wc
+             else do { wc_residual <- nestTcS (solve_wanteds_and_drop wc)
+                            -- See Note [Must simplify after defaulting]
+                     ; try_class_defaulting wc_residual } }
     
-    simpl_top_loop wc
+    try_class_defaulting :: WantedConstraints -> TcS WantedConstraints
+    try_class_defaulting wc
       | isEmptyWC wc || insolubleWC wc
-             -- Don't do type-class defaulting if there are insolubles
-             -- Doing so is not going to solve the insolubles
-      = return wc
+      = return wc  -- Don't do type-class defaulting if there are insolubles
+                   -- Doing so is not going to solve the insolubles
       | otherwise
-      = do { wc_residual <- nestTcS (solve_wanteds_and_drop wc)
-           ; let wc_flat_approximate = approximateWC wc_residual
-           ; something_happened <- applyDefaultingRules wc_flat_approximate
-                                        -- See Note [Top-level Defaulting Plan]
-           ; if something_happened then 
-               simpl_top_loop wc_residual 
-             else 
-               return wc_residual }
+      = do { something_happened <- applyDefaultingRules (approximateWC wc)
+                                   -- See Note [Top-level Defaulting Plan]
+           ; if something_happened 
+             then do { wc_residual <- nestTcS (solve_wanteds_and_drop wc)
+                     ; try_class_defaulting wc_residual }
+             else return wc }
 \end{code}
+
+Note [Must simplify after defaulting]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We may have a deeply buried constraint
+    (t:*) ~ (a:Open)
+which we couldn't solve because of the kind incompatibility, and 'a' is free.
+Then when we default 'a' we can solve the constraint.  And we want to do
+that before starting in on type classes.  We MUST do it before reporting
+errors, because it isn't an error!  Trac #7967 was due to this.
 
 Note [Top-level Defaulting Plan]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 We have considered two design choices for where/when to apply defaulting.   
    (i) Do it in SimplCheck mode only /whenever/ you try to solve some 
        flat constraints, maybe deep inside the context of implications.
@@ -184,18 +204,6 @@ simplifyDefault theta
 *                                                                                 *
 ***********************************************************************************
 
-Note [Which variables to quantify]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Suppose the inferred type of a function is
-   T kappa (alpha:kappa) -> Int
-where alpha is a type unification variable and 
-      kappa is a kind unification variable
-Then we want to quantify over *both* alpha and kappa.  But notice that
-kappa appears "at top level" of the type, as well as inside the kind
-of alpha.  So it should be fine to just look for the "top level"
-kind/type variables of the type, without looking transitively into the
-kinds of those type variables.
-
 \begin{code}
 simplifyInfer :: Bool
               -> Bool                  -- Apply monomorphism restriction
@@ -210,13 +218,10 @@ simplifyInfer :: Bool
                       TcEvBinds)    -- ... binding these evidence variables
 simplifyInfer _top_lvl apply_mr name_taus wanteds
   | isEmptyWC wanteds
-  = do { gbl_tvs     <- tcGetGlobalTyVars            -- Already zonked
-       ; zonked_taus <- zonkTcTypes (map snd name_taus)
-       ; let tvs_to_quantify = varSetElems (tyVarsOfTypes zonked_taus `minusVarSet` gbl_tvs)
-       	     		       -- tvs_to_quantify can contain both kind and type vars
-       	                       -- See Note [Which variables to quantify]
-       ; qtvs <- zonkQuantifiedTyVars tvs_to_quantify
-       ; return (qtvs, [], False, emptyTcEvBinds) }
+  = do { gbl_tvs <- tcGetGlobalTyVars
+       ; qtkvs <- quantifyTyVars gbl_tvs (tyVarsOfTypes (map snd name_taus))
+       ; traceTc "simplifyInfer: emtpy WC" (ppr name_taus $$ ppr qtkvs) 
+       ; return (qtkvs, [], False, emptyTcEvBinds) }
 
   | otherwise
   = do { traceTc "simplifyInfer {"  $ vcat
@@ -258,7 +263,7 @@ simplifyInfer _top_lvl apply_mr name_taus wanteds
 
        ; tc_lcl_env <- TcRnMonad.getLclEnv
        ; let untch = tcl_untch tc_lcl_env
-       ; quant_pred_candidates   
+       ; quant_pred_candidates   -- Fully zonked
            <- if insolubleWC wanted_transformed 
               then return []   -- See Note [Quantification with errors]
               else do { gbl_tvs <- tcGetGlobalTyVars
@@ -280,52 +285,50 @@ simplifyInfer _top_lvl apply_mr name_taus wanteds
        --     unifications that may have happened
        ; gbl_tvs        <- tcGetGlobalTyVars
        ; zonked_tau_tvs <- TcM.zonkTyVarsAndFV (tyVarsOfTypes (map snd name_taus))
-       ; let init_tvs  = zonked_tau_tvs `minusVarSet` gbl_tvs
-             poly_qtvs = growThetaTyVars quant_pred_candidates init_tvs 
+       ; let poly_qtvs = growThetaTyVars quant_pred_candidates zonked_tau_tvs
                          `minusVarSet` gbl_tvs
              pbound    = filter (quantifyPred poly_qtvs) quant_pred_candidates
              
 	     -- Monomorphism restriction
-             mr_qtvs  	     = init_tvs `minusVarSet` constrained_tvs
-             constrained_tvs = tyVarsOfTypes quant_pred_candidates
+             constrained_tvs = tyVarsOfTypes pbound `unionVarSet` gbl_tvs
 	     mr_bites        = apply_mr && not (null pbound)
 
-             (qtvs, bound) | mr_bites  = (mr_qtvs,   [])
-                           | otherwise = (poly_qtvs, pbound)
+       ; (qtvs, bound) <- if mr_bites 
+                          then do { qtvs <- quantifyTyVars constrained_tvs zonked_tau_tvs
+                                  ; return (qtvs, []) }
+                          else do { qtvs <- quantifyTyVars gbl_tvs poly_qtvs
+                                  ; return (qtvs, pbound) }
              
        ; traceTc "simplifyWithApprox" $
          vcat [ ptext (sLit "quant_pred_candidates =") <+> ppr quant_pred_candidates
               , ptext (sLit "gbl_tvs=") <+> ppr gbl_tvs
               , ptext (sLit "zonked_tau_tvs=") <+> ppr zonked_tau_tvs
               , ptext (sLit "pbound =") <+> ppr pbound
-              , ptext (sLit "init_qtvs =") <+> ppr init_tvs 
-              , ptext (sLit "poly_qtvs =") <+> ppr poly_qtvs ]
+              , ptext (sLit "bbound =") <+> ppr bound
+              , ptext (sLit "poly_qtvs =") <+> ppr poly_qtvs
+              , ptext (sLit "constrained_tvs =") <+> ppr constrained_tvs
+              , ptext (sLit "mr_bites =") <+> ppr mr_bites
+              , ptext (sLit "qtvs =") <+> ppr qtvs ]
 
-       ; if isEmptyVarSet qtvs && null bound
-         then do { traceTc "} simplifyInfer/no quantification" empty                   
+       ; if null qtvs && null bound
+         then do { traceTc "} simplifyInfer/no implication needed" empty                   
                  ; emitConstraints wanted_transformed
                     -- Includes insolubles (if -fdefer-type-errors)
                     -- as well as flats and implications
                  ; return ([], [], mr_bites, TcEvBinds ev_binds_var) }
          else do
 
-       { traceTc "simplifyApprox" $ 
-         ptext (sLit "bound are =") <+> ppr bound 
-         
-            -- Step 4, zonk quantified variables 
-       ; let minimal_flat_preds = mkMinimalBySCs bound
+      {     -- Step 7) Emit an implication
+         let minimal_flat_preds = mkMinimalBySCs bound
              skol_info = InferSkol [ (name, mkSigmaTy [] minimal_flat_preds ty)
                                    | (name, ty) <- name_taus ]
                         -- Don't add the quantified variables here, because
                         -- they are also bound in ic_skols and we want them to be
                         -- tidied uniformly
 
-       ; qtvs_to_return <- zonkQuantifiedTyVars (varSetElems qtvs)
-
-            -- Step 7) Emit an implication
        ; minimal_bound_ev_vars <- mapM TcM.newEvVar minimal_flat_preds
        ; let implic = Implic { ic_untch    = pushUntouchables untch
-                             , ic_skols    = qtvs_to_return
+                             , ic_skols    = qtvs
                              , ic_fsks     = []  -- wanted_tansformed arose only from solveWanteds
                                                  -- hence no flatten-skolems (which come from givens)
                              , ic_given    = minimal_bound_ev_vars
@@ -339,11 +342,11 @@ simplifyInfer _top_lvl apply_mr name_taus wanteds
        ; traceTc "} simplifyInfer/produced residual implication for quantification" $
              vcat [ ptext (sLit "implic =") <+> ppr implic
                        -- ic_skols, ic_given give rest of result
-                  , ptext (sLit "qtvs =") <+> ppr qtvs_to_return
+                  , ptext (sLit "qtvs =") <+> ppr qtvs
                   , ptext (sLit "spb =") <+> ppr quant_pred_candidates
                   , ptext (sLit "bound =") <+> ppr bound ]
 
-       ; return ( qtvs_to_return, minimal_bound_ev_vars
+       ; return ( qtvs, minimal_bound_ev_vars
                 , mr_bites,  TcEvBinds ev_binds_var) } }
 
 quantifyPred :: TyVarSet           -- Quantifying over these
@@ -799,7 +802,7 @@ defaultTyVar :: TcTyVar -> TcS TcTyVar
 -- Precondition: MetaTyVars only
 -- See Note [DefaultTyVar]
 defaultTyVar the_tv
-  | not (k `eqKind` default_k)
+  | Just default_k <- defaultKind_maybe (tyVarKind the_tv)
   = do { tv' <- TcS.cloneMetaTyVar the_tv
        ; let new_tv = setTyVarKind tv' default_k
        ; traceTcS "defaultTyVar" (ppr the_tv <+> ppr new_tv)
@@ -810,9 +813,6 @@ defaultTyVar the_tv
              -- We keep the same Untouchables on tv'
 
   | otherwise = return the_tv	 -- The common case
-  where
-    k = tyVarKind the_tv
-    default_k = defaultKind k
 
 approximateWC :: WantedConstraints -> Cts
 -- Postcondition: Wanted or Derived Cts 

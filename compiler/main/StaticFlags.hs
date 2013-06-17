@@ -30,13 +30,15 @@ module StaticFlags (
         opt_NoStateHack,
         opt_CprOff,
         opt_NoOptCoercion,
-        opt_NoFlatCache,
 
         -- For the parser
         addOpt, removeOpt, v_opt_C_ready,
 
         -- Saving/restoring globals
-        saveStaticFlagGlobals, restoreStaticFlagGlobals
+        saveStaticFlagGlobals, restoreStaticFlagGlobals,
+
+        -- For options autocompletion
+        flagsStatic, flagsStaticNames
   ) where
 
 #include "HsVersions.h"
@@ -140,13 +142,16 @@ flagsStatic = [
   ]
 
 
+
 isStaticFlag :: String -> Bool
-isStaticFlag f =
-  f `elem` [
+isStaticFlag f = f `elem` flagsStaticNames
+
+
+flagsStaticNames :: [String]
+flagsStaticNames = [
     "fdicts-strict",
     "fno-state-hack",
     "fno-opt-coercion",
-    "fno-flat-cache",
     "fcpr-off"
     ]
 
@@ -197,9 +202,6 @@ opt_CprOff         = lookUp  (fsLit "-fcpr-off")
 
 opt_NoOptCoercion  :: Bool
 opt_NoOptCoercion  = lookUp  (fsLit "-fno-opt-coercion")
-
-opt_NoFlatCache    :: Bool
-opt_NoFlatCache     = lookUp  (fsLit "-fno-flat-cache")
 
 
 -----------------------------------------------------------------------------

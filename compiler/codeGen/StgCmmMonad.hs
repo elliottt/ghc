@@ -514,7 +514,7 @@ getTickyCtrLabel = do
         info <- getInfoDown
         return (cgd_ticky info)
 
-setTickyCtrLabel :: CLabel -> FCode () -> FCode ()
+setTickyCtrLabel :: CLabel -> FCode a -> FCode a
 setTickyCtrLabel ticky code = do
         info <- getInfoDown
         withInfoDown code (info {cgd_ticky = ticky})
@@ -553,8 +553,8 @@ forkStatics :: FCode a -> FCode a
 -- The Abstract~C returned is attached to the current state, but the
 -- bindings and usage information is otherwise unchanged.
 forkStatics body_code
-  = do        { dflags <- getDynFlags
-              ; info  <- getInfoDown
+  = do  { dflags <- getDynFlags
+        ; info  <- getInfoDown
         ; us    <- newUniqSupply
         ; state <- getState
         ; let   rhs_info_down = info { cgd_statics = cgs_binds state

@@ -243,9 +243,14 @@ spontaneousSolveStage workItem
   = do { mb_solved <- trySpontaneousSolve workItem
        ; case mb_solved of
            SPCantSolve
-              | CTyEqCan { cc_tyvar = tv, cc_ev = fl } <- workItem
+              | CTyEqCan { cc_tyvar = tv, cc_rhs = rhs, cc_ev = fl } <- workItem
               -- Unsolved equality
-              -> do { n_kicked <- kickOutRewritable (ctEvFlavour fl) tv
+              -> do { untch <- getUntouchables
+                    ; traceTcS "Can't solve tyvar equality" 
+                          (vcat [ text "LHS:" <+> ppr tv <+> dcolon <+> ppr (tyVarKind tv)
+                                , text "RHS:" <+> ppr rhs <+> dcolon <+> ppr (typeKind rhs)
+                                , text "Untouchables =" <+> ppr untch ])
+                    ; n_kicked <- kickOutRewritable (ctEvFlavour fl) tv
                     ; traceFireTcS workItem $
                       ptext (sLit "Kept as inert") <+> ppr_kicked n_kicked <> colon 
                       <+> ppr workItem
@@ -404,7 +409,8 @@ trySpontaneousSolve :: WorkItem -> TcS SPSolveResult
 trySpontaneousSolve workItem@(CTyEqCan { cc_ev = gw
                                        , cc_tyvar = tv1, cc_rhs = xi, cc_loc = d })
   | isGiven gw
-  = return SPCantSolve
+  = do { traceTcS "No spontaneous solve for given" (ppr workItem)
+       ; return SPCantSolve }
   | Just tv2 <- tcGetTyVar_maybe xi
   = do { tch1 <- isTouchableMetaTyVarTcS tv1
        ; tch2 <- isTouchableMetaTyVarTcS tv2
@@ -412,21 +418,17 @@ trySpontaneousSolve workItem@(CTyEqCan { cc_ev = gw
            (True,  True)  -> trySpontaneousEqTwoWay d gw tv1 tv2
            (True,  False) -> trySpontaneousEqOneWay d gw tv1 xi
            (False, True)  -> trySpontaneousEqOneWay d gw tv2 (mkTyVarTy tv1)
-	   _ -> return SPCantSolve }
+	   _              -> return SPCantSolve }
   | otherwise
   = do { tch1 <- isTouchableMetaTyVarTcS tv1
        ; if tch1 then trySpontaneousEqOneWay d gw tv1 xi
-                 else do { untch <- getUntouchables
-                         ; traceTcS "Untouchable LHS, can't spontaneously solve workitem" $
-                           vcat [text "Untouchables =" <+> ppr untch
-                                , text "Workitem =" <+> ppr workItem ]
-                         ; return SPCantSolve }
-       }
+                 else return SPCantSolve }
 
   -- No need for 
   --      trySpontaneousSolve (CFunEqCan ...) = ...
   -- See Note [No touchables as FunEq RHS] in TcSMonad
-trySpontaneousSolve _ = return SPCantSolve
+trySpontaneousSolve item = do { traceTcS "Spont: no tyvar on lhs" (ppr item)
+                              ; return SPCantSolve }
 
 ----------------
 trySpontaneousEqOneWay :: CtLoc -> CtEvidence 
@@ -457,57 +459,6 @@ trySpontaneousEqTwoWay d gw tv1 tv2
     nicer_to_update_tv2 = isSigTyVar tv1 || isSystemName (Var.varName tv2)
 \end{code}
 
-Note [Kind errors] 
-~~~~~~~~~~~~~~~~~~
-Consider the wanted problem: 
-      alpha ~ (# Int, Int #) 
-where alpha :: ArgKind and (# Int, Int #) :: (#). We can't spontaneously solve this constraint, 
-but we should rather reject the program that give rise to it. If 'trySpontaneousEqTwoWay' 
-simply returns @CantSolve@ then that wanted constraint is going to propagate all the way and 
-get quantified over in inference mode. That's bad because we do know at this point that the 
-constraint is insoluble. Instead, we call 'recKindErrorTcS' here, which will fail later on.
-
-The same applies in canonicalization code in case of kind errors in the givens. 
-
-However, when we canonicalize givens we only check for compatibility (@compatKind@). 
-If there were a kind error in the givens, this means some form of inconsistency or dead code.
-
-You may think that when we spontaneously solve wanteds we may have to look through the 
-bindings to determine the right kind of the RHS type. E.g one may be worried that xi is 
-@alpha@ where alpha :: ? and a previous spontaneous solving has set (alpha := f) with (f :: *).
-But we orient our constraints so that spontaneously solved ones can rewrite all other constraint
-so this situation can't happen. 
-
-Note [Spontaneous solving and kind compatibility] 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Note that our canonical constraints insist that *all* equalities (tv ~
-xi) or (F xis ~ rhs) require the LHS and the RHS to have *compatible*
-the same kinds.  ("compatible" means one is a subKind of the other.)
-
-  - It can't be *equal* kinds, because
-     b) wanted constraints don't necessarily have identical kinds
-               eg   alpha::? ~ Int
-     b) a solved wanted constraint becomes a given
-
-  - SPJ thinks that *given* constraints (tv ~ tau) always have that
-    tau has a sub-kind of tv; and when solving wanted constraints
-    in trySpontaneousEqTwoWay we re-orient to achieve this.
-
-  - Note that the kind invariant is maintained by rewriting.
-    Eg wanted1 rewrites wanted2; if both were compatible kinds before,
-       wanted2 will be afterwards.  Similarly givens.
-
-Caveat:
-  - Givens from higher-rank, such as: 
-          type family T b :: * -> * -> * 
-          type instance T Bool = (->) 
-
-          f :: forall a. ((T a ~ (->)) => ...) -> a -> ... 
-          flop = f (...) True 
-     Whereas we would be able to apply the type instance, we would not be able to 
-     use the given (T Bool ~ (->)) in the body of 'flop' 
-
-
 Note [Avoid double unifications] 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The spontaneous solver has to return a given which mentions the unified unification
@@ -527,8 +478,6 @@ double unifications is the main reason we disallow touchable
 unification variables as RHS of type family equations: F xis ~ alpha.
 
 \begin{code}
-----------------
-
 solveWithIdentity :: CtLoc -> CtEvidence -> TcTyVar -> Xi -> TcS SPSolveResult
 -- Solve with the identity coercion 
 -- Precondition: kind(xi) is a sub-kind of kind(tv)
@@ -1397,7 +1346,7 @@ doTopReact inerts workItem
        ; case workItem of
       	   CDictCan { cc_ev = fl, cc_class = cls, cc_tyargs = xis
       	            , cc_loc = d }
-      	      -> doTopReactDict inerts workItem fl cls xis d
+      	      -> doTopReactDict inerts fl cls xis d
 
       	   CFunEqCan { cc_ev = fl, cc_fun = tc, cc_tyargs = args
       	             , cc_rhs = xi, cc_loc = d }
@@ -1407,42 +1356,31 @@ doTopReact inerts workItem
       	         return NoTopInt  }
 
 --------------------
-doTopReactDict :: InertSet -> WorkItem -> CtEvidence -> Class -> [Xi]
+doTopReactDict :: InertSet -> CtEvidence -> Class -> [Xi]
                -> CtLoc -> TcS TopInteractResult
-doTopReactDict inerts workItem fl cls xis loc
-  = do { instEnvs <- getInstEnvs 
-       ; let pred = mkClassPred cls xis
-             fd_eqns = improveFromInstEnv instEnvs (pred, arising_sdoc)
-             
-       ; fd_work <- rewriteWithFunDeps fd_eqns loc
-       ; if not (null fd_work) then
-            do { updWorkListTcS (extendWorkListEqs fd_work)
-               ; return SomeTopInt { tir_rule = "Dict/Top (fundeps)"
-                                   , tir_new_item = ContinueWith workItem } }
-         else if not (isWanted fl) then 
-            return NoTopInt
-         else do
+doTopReactDict inerts fl cls xis loc
+  | not (isWanted fl)
+  = try_fundeps_and_return
 
-       { solved_dicts <- getTcSInerts >>= (return . inert_solved_dicts)
-       ; case lookupSolvedDict solved_dicts pred of {
-            Just ev -> do { setEvBind dict_id (ctEvTerm ev); 
-                          ; return $ 
-                            SomeTopInt { tir_rule = "Dict/Top (cached)" 
-                                       , tir_new_item = Stop } } ;
-            Nothing -> do
+  | Just ev <- lookupSolvedDict inerts pred   -- Cached
+  = do { setEvBind dict_id (ctEvTerm ev); 
+       ; return $ SomeTopInt { tir_rule = "Dict/Top (cached)" 
+                             , tir_new_item = Stop } } 
 
-      { lkup_inst_res  <- matchClassInst inerts cls xis loc
-      ; case lkup_inst_res of
-           GenInst wtvs ev_term -> do { addSolvedDict fl 
-                                      ; doSolveFromInstance wtvs ev_term }
-           NoInstance -> return NoTopInt } } } }
+  | otherwise  -- Not cached
+   = do { lkup_inst_res <- matchClassInst inerts cls xis loc
+         ; case lkup_inst_res of
+               GenInst wtvs ev_term -> do { addSolvedDict fl 
+                                          ; solve_from_instance wtvs ev_term }
+               NoInstance -> try_fundeps_and_return }
    where 
      arising_sdoc = pprArisingAt loc
      dict_id = ctEvId fl
-     
-     doSolveFromInstance :: [CtEvidence] -> EvTerm -> TcS TopInteractResult
+     pred = mkClassPred cls xis
+                       
+     solve_from_instance :: [CtEvidence] -> EvTerm -> TcS TopInteractResult
       -- Precondition: evidence term matches the predicate workItem
-     doSolveFromInstance evs ev_term 
+     solve_from_instance evs ev_term 
         | null evs
         = do { traceTcS "doTopReact/found nullary instance for" $
                ppr dict_id
@@ -1462,6 +1400,18 @@ doTopReactDict inerts workItem fl cls xis loc
                SomeTopInt { tir_rule     = "Dict/Top (solved, more work)"
                           , tir_new_item = Stop } }
 
+     -- We didn't solve it; so try functional dependencies with 
+     -- the instance environment, and return
+     -- NB: even if there *are* some functional dependencies against the
+     -- instance environment, there might be a unique match, and if 
+     -- so we make sure we get on and solve it first. See Note [Weird fundeps]
+     try_fundeps_and_return
+       = do { instEnvs <- getInstEnvs 
+            ; let fd_eqns = improveFromInstEnv instEnvs (pred, arising_sdoc)
+            ; fd_work <- rewriteWithFunDeps fd_eqns loc
+            ; unless (null fd_work) (updWorkListTcS (extendWorkListEqs fd_work))
+            ; return NoTopInt }
+       
 --------------------
 doTopReactFunEq :: Ct -> CtEvidence -> TyCon -> [Xi] -> Xi
                 -> CtLoc -> TcS TopInteractResult
@@ -1591,6 +1541,25 @@ and now we need improvement between that derived superclass an the Given (L a b)
 
 Test typecheck/should_fail/FDsFromGivens also shows why it's a good idea to 
 emit Derived FDs for givens as well. 
+
+Note [Weird fundeps]
+~~~~~~~~~~~~~~~~~~~~
+Consider   class Het a b | a -> b where
+              het :: m (f c) -> a -> m b
+
+	   class GHet (a :: * -> *) (b :: * -> *) | a -> b
+	   instance            GHet (K a) (K [a])
+	   instance Het a b => GHet (K a) (K b)
+
+The two instances don't actually conflict on their fundeps,
+although it's pretty strange.  So they are both accepted. Now
+try   [W] GHet (K Int) (K Bool)
+This triggers fudeps from both instance decls; but it also 
+matches a *unique* instance decl, and we should go ahead and
+pick that one right now.  Otherwise, if we don't, it ends up 
+unsolved in the inert set and is reported as an error.
+
+Trac #7875 is a case in point.
 
 Note [Overriding implicit parameters]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

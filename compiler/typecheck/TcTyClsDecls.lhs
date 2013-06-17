@@ -311,13 +311,13 @@ kcTyClGroup decls
         ; return res }
 
   where
-    generalise :: TcTypeEnv -> Name -> LHsTyVarBndrs Name -> TcM (Name, Kind)
+    generalise :: TcTypeEnv -> Name -> TcM (Name, Kind)
     -- For polymorphic things this is a no-op
-    generalise kind_env name tvs
+    generalise kind_env name
       = do { let kc_kind = case lookupNameEnv kind_env name of
                                Just (AThing k) -> k
                                _ -> pprPanic "kcTyClGroup" (ppr name $$ ppr kind_env)
-           ; kvs <- kindGeneralize (tyVarsOfType kc_kind) (hsLTyVarNames tvs)
+           ; kvs <- kindGeneralize (tyVarsOfType kc_kind)
            ; kc_kind' <- zonkTcKind kc_kind    -- Make sure kc_kind' has the final,
                                                -- skolemised kind variables
            ; traceTc "Generalise kind" (vcat [ ppr name, ppr kc_kind, ppr kvs, ppr kc_kind' ])
@@ -325,8 +325,8 @@ kcTyClGroup decls
 
     generaliseTCD :: TcTypeEnv -> LTyClDecl Name -> TcM [(Name, Kind)]
     generaliseTCD kind_env (L _ decl)
-      | ClassDecl { tcdLName = (L _ name), tcdTyVars = tyvars, tcdATs = ats } <- decl
-      = do { first <- generalise kind_env name tyvars
+      | ClassDecl { tcdLName = (L _ name), tcdATs = ats } <- decl
+      = do { first <- generalise kind_env name
            ; rest <- mapM ((generaliseFamDecl kind_env) . unLoc) ats
            ; return (first : rest) }
 
@@ -339,12 +339,12 @@ kcTyClGroup decls
 
       | otherwise
       -- Note: tcdTyVars is safe here because we've eliminated FamDecl and ForeignType
-      = do { res <- generalise kind_env (tcdName decl) (tcdTyVars decl)
+      = do { res <- generalise kind_env (tcdName decl)
            ; return [res] }
 
     generaliseFamDecl :: TcTypeEnv -> FamilyDecl Name -> TcM (Name, Kind)
-    generaliseFamDecl kind_env (FamilyDecl { fdLName = L _ name, fdTyVars = tyvars })
-      = generalise kind_env name tyvars
+    generaliseFamDecl kind_env (FamilyDecl { fdLName = L _ name })
+      = generalise kind_env name
 
 mk_thing_env :: [LTyClDecl Name] -> [(Name, TcTyThing)]
 mk_thing_env [] = []
@@ -975,8 +975,7 @@ tcFamTyPats fam_tc (HsWB { hswb_cts = arg_pats, hswb_kvs = kvars, hswb_tvs = tva
             -- them into skolems, so that we don't subsequently
             -- replace a meta kind var with AnyK
             -- Very like kindGeneralize
-       ; tkvs <- zonkTyVarsAndFV (tyVarsOfTypes all_args)
-       ; qtkvs <- zonkQuantifiedTyVars (varSetElems tkvs)
+       ; qtkvs <- quantifyTyVars emptyVarSet (tyVarsOfTypes all_args)
 
             -- Zonk the patterns etc into the Type world
        ; (ze, qtkvs') <- zonkTyBndrsX emptyZonkEnv qtkvs
@@ -1073,54 +1072,51 @@ consUseH98Syntax _                                             = True
 -----------------------------------
 tcConDecls :: NewOrData -> TyCon -> ([TyVar], Type)
            -> [LConDecl Name] -> TcM [DataCon]
-tcConDecls new_or_data rep_tycon res_tmpl cons
-  = mapM (addLocM (tcConDecl new_or_data rep_tycon res_tmpl)) cons
+tcConDecls new_or_data rep_tycon (tmpl_tvs, res_tmpl) cons
+  = mapM (addLocM  $ tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl) cons
 
 tcConDecl :: NewOrData
-          -> TyCon              -- Representation tycon
-          -> ([TyVar], Type)    -- Return type template (with its template tyvars)
+          -> TyCon             -- Representation tycon
+          -> [TyVar] -> Type   -- Return type template (with its template tyvars)
+                               --    (tvs, T tys), where T is the family TyCon
           -> ConDecl Name
           -> TcM DataCon
 
-tcConDecl new_or_data rep_tycon res_tmpl        -- Data types
+tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl        -- Data types
           (ConDecl { con_name = name
                    , con_qvars = hs_tvs, con_cxt = hs_ctxt
                    , con_details = hs_details, con_res = hs_res_ty })
   = addErrCtxt (dataConCtxt name) $
     do { traceTc "tcConDecl 1" (ppr name)
-       ; (tvs, ctxt, arg_tys, res_ty, is_infix, field_lbls, stricts)
-           <- tcHsTyVarBndrs hs_tvs $ \ tvs ->
+       ; (ctxt, arg_tys, res_ty, is_infix, field_lbls, stricts)
+           <- tcHsTyVarBndrs hs_tvs $ \ _ ->
               do { ctxt    <- tcHsContext hs_ctxt
                  ; details <- tcConArgs new_or_data hs_details
                  ; res_ty  <- tcConRes hs_res_ty
                  ; let (is_infix, field_lbls, btys) = details
                        (arg_tys, stricts)           = unzip btys
-                 ; return (tvs, ctxt, arg_tys, res_ty, is_infix, field_lbls, stricts) }
-
-       ; let pretend_res_ty = case res_ty of
-                                ResTyH98     -> unitTy
-                                ResTyGADT ty -> ty
-             pretend_con_ty = mkSigmaTy tvs ctxt (mkFunTys arg_tys pretend_res_ty)
-                -- This pretend_con_ty stuff is just a convenient way to get the
-                -- free kind variables of the type, for kindGeneralize to work on
+                 ; return (ctxt, arg_tys, res_ty, is_infix, field_lbls, stricts) }
 
              -- Generalise the kind variables (returning quantifed TcKindVars)
-             -- and quantify the type variables (substiting their kinds)
-       ; kvs <- kindGeneralize (tyVarsOfType pretend_con_ty) (map getName tvs)
-       ; tvs <- zonkQuantifiedTyVars tvs
-
+             -- and quantify the type variables (substituting their kinds)
+             -- REMEMBER: 'tkvs' are:
+             --    ResTyH98:  the *existential* type variables only
+             --    ResTyGADT: *all* the quantified type variables
+             -- c.f. the comment on con_qvars in HsDecls
+       ; tkvs <- case res_ty of 
+                   ResTyH98         -> quantifyTyVars (mkVarSet tmpl_tvs) (tyVarsOfTypes (ctxt++arg_tys))
+                   ResTyGADT res_ty -> quantifyTyVars emptyVarSet (tyVarsOfTypes (res_ty:ctxt++arg_tys))
+                   
              -- Zonk to Types
-       ; (ze, qtkvs) <- zonkTyBndrsX emptyZonkEnv (kvs ++ tvs)
+       ; (ze, qtkvs) <- zonkTyBndrsX emptyZonkEnv tkvs
        ; arg_tys <- zonkTcTypeToTypes ze arg_tys
        ; ctxt    <- zonkTcTypeToTypes ze ctxt
        ; res_ty  <- case res_ty of
                       ResTyH98     -> return ResTyH98
                       ResTyGADT ty -> ResTyGADT <$> zonkTcTypeToType ze ty
 
-       ; let (univ_tvs, ex_tvs, eq_preds, res_ty')
-                = rejigConRes res_tmpl qtkvs res_ty
+       ; let (univ_tvs, ex_tvs, eq_preds, res_ty') = rejigConRes tmpl_tvs res_tmpl qtkvs res_ty
 
-       ; traceTc "tcConDecl 3" (ppr name)
        ; fam_envs <- tcGetFamInstEnvs
        ; buildDataCon fam_envs (unLoc name) is_infix
                       stricts field_lbls
@@ -1167,7 +1163,7 @@ tcConRes (ResTyGADT res_ty) = do { res_ty' <- tcHsLiftedType res_ty
 --      TI :: forall b1 c1. (b1 ~ c1) => b1 -> :R7T b1 c1
 -- In this case orig_res_ty = T (e,e)
 
-rejigConRes :: ([TyVar], Type)  -- Template for result type; e.g.
+rejigConRes :: [TyVar] -> Type  -- Template for result type; e.g.
                                 -- data instance T [a] b c = ...
                                 --      gives template ([a,b,c], T [a] b c)
              -> [TyVar]         -- where MkT :: forall x y z. ...
@@ -1180,13 +1176,13 @@ rejigConRes :: ([TyVar], Type)  -- Template for result type; e.g.
         -- the same as the parent tycon, because we are in the middle
         -- of a recursive knot; so it's postponed until checkValidDataCon
 
-rejigConRes (tmpl_tvs, res_ty) dc_tvs ResTyH98
+rejigConRes tmpl_tvs res_ty dc_tvs ResTyH98
   = (tmpl_tvs, dc_tvs, [], res_ty)
         -- In H98 syntax the dc_tvs are the existential ones
         --      data T a b c = forall d e. MkT ...
         -- The {a,b,c} are tc_tvs, and {d,e} are dc_tvs
 
-rejigConRes (tmpl_tvs, res_tmpl) dc_tvs (ResTyGADT res_ty)
+rejigConRes tmpl_tvs res_tmpl dc_tvs (ResTyGADT res_ty)
         -- E.g.  data T [a] b c where
         --         MkT :: forall x y z. T [(x,y)] z z
         -- Then we generate
@@ -1468,16 +1464,26 @@ checkNewDataCon :: DataCon -> TcM ()
 checkNewDataCon con
   = do  { checkTc (isSingleton arg_tys) (newtypeFieldErr con (length arg_tys))
                 -- One argument
-        ; checkTc (null eq_spec) (newtypePredError con)
+
+        ; check_con (null eq_spec) $
+          ptext (sLit "A newtype constructor must have a return type of form T a1 ... an")
                 -- Return type is (T a b c)
-        ; checkTc (null ex_tvs && null theta) (newtypeExError con)
+
+        ; check_con (null theta) $
+          ptext (sLit "A newtype constructor cannot have a context in its type")
+
+        ; check_con (null ex_tvs) $
+          ptext (sLit "A newtype constructor cannot have existential type variables")
                 -- No existentials
+
         ; checkTc (not (any isBanged (dataConStrictMarks con)))
                   (newtypeStrictError con)
                 -- No strictness
     }
   where
     (_univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig con
+    check_con what msg 
+       = checkTc what (msg $$ ppr con <+> dcolon <+> ppr (dataConUserType con))
 
 -------------------------------
 checkValidClass :: Class -> TcM ()
@@ -1881,10 +1887,11 @@ badGadtDecl tc_name
          , nest 2 (parens $ ptext (sLit "Use -XGADTs to allow GADTs")) ]
 
 badExistential :: DataCon -> SDoc
-badExistential con_name
-  = hang (ptext (sLit "Data constructor") <+> quotes (ppr con_name) <+>
+badExistential con
+  = hang (ptext (sLit "Data constructor") <+> quotes (ppr con) <+>
                 ptext (sLit "has existential type variables, a context, or a specialised result type"))
-       2 (parens $ ptext (sLit "Use -XExistentialQuantification or -XGADTs to allow this"))
+       2 (vcat [ ppr con <+> dcolon <+> ppr (dataConUserType con)
+               , parens $ ptext (sLit "Use -XExistentialQuantification or -XGADTs to allow this") ]) 
 
 badStupidTheta :: Name -> SDoc
 badStupidTheta tc_name
@@ -1895,20 +1902,10 @@ newtypeConError tycon n
   = sep [ptext (sLit "A newtype must have exactly one constructor,"),
          nest 2 $ ptext (sLit "but") <+> quotes (ppr tycon) <+> ptext (sLit "has") <+> speakN n ]
 
-newtypeExError :: DataCon -> SDoc
-newtypeExError con
-  = sep [ptext (sLit "A newtype constructor cannot have an existential context,"),
-         nest 2 $ ptext (sLit "but") <+> quotes (ppr con) <+> ptext (sLit "does")]
-
 newtypeStrictError :: DataCon -> SDoc
 newtypeStrictError con
   = sep [ptext (sLit "A newtype constructor cannot have a strictness annotation,"),
          nest 2 $ ptext (sLit "but") <+> quotes (ppr con) <+> ptext (sLit "does")]
-
-newtypePredError :: DataCon -> SDoc
-newtypePredError con
-  = sep [ptext (sLit "A newtype constructor must have a return type of form T a1 ... an"),
-         nest 2 $ ptext (sLit "but") <+> quotes (ppr con) <+> ptext (sLit "does not")]
 
 newtypeFieldErr :: DataCon -> Int -> SDoc
 newtypeFieldErr con_name n_flds

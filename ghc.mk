@@ -76,11 +76,28 @@
 
 default : all
 
+
+##################################################
+# Check that we have a new enough 'make'
+
+HAVE_EVAL := NO
+$(eval HAVE_EVAL := YES)
+
+ifeq "$(HAVE_EVAL)" "NO"
+$(error Your make does not support eval. You need GNU make >= 3.81)
+endif
+
+ifeq "$(abspath /)" ""
+$(error Your make does not support abspath. You need GNU make >= 3.81)
+endif
+##################################################
+
+
 # Catch make if it runs away into an infinite loop
 ifeq      "$(MAKE_RESTARTS)" ""
 else ifeq "$(MAKE_RESTARTS)" "1"
 else
-$(error Make has restarted itself $(MAKE_RESTARTS) times; is there a makefile bug?)
+$(error Make has restarted itself $(MAKE_RESTARTS) times; is there a makefile bug? See http://hackage.haskell.org/trac/ghc/wiki/Building/Troubleshooting#Makehasrestarteditself3timesisthereamakefilebug for details)
 endif
 
 ifneq "$(CLEANING)" "YES"
@@ -109,6 +126,14 @@ comma=,
 
 show:
 	@echo '$(VALUE)="$($(VALUE))"'
+
+# echo is used by the nightly builders to query the build system for
+# information.
+# Using printf means that we don't get a trailing newline. We escape
+# backslashes and double quotes in the string to protect them from the
+# shell, and percent signs to protect them from printf.
+echo:
+	@printf "$(subst %,%%,$(subst ",\",$(subst \,\\\\,$($(VALUE)))))"
 
 # -----------------------------------------------------------------------------
 # Include subsidiary build-system bits
@@ -167,7 +192,7 @@ include rules/clean-target.mk
 # -----------------------------------------------------------------------------
 # The inplace tree
 
-$(eval $(call clean-target,inplace,,inplace/bin inplace/lib))
+$(eval $(call clean-target,root,inplace,inplace/bin inplace/lib))
 
 # -----------------------------------------------------------------------------
 # Whether to build dependencies or not
@@ -203,6 +228,15 @@ else
 GHCI_WAY = v
 HADDOCK_WAY = v
 endif
+
+WINDOWS_DYN_PROG_RTS := rts
+ifeq "$(GhcThreaded)" "YES"
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_thr
+endif
+ifeq "$(GhcDebugged)" "YES"
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_debug
+endif
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_dyn_LIB_NAME
 
 # -----------------------------------------------------------------------------
 # Compilation Flags
@@ -556,18 +590,6 @@ $(error Unknown integer library: $(INTEGER_LIBRARY))
 endif
 endif
 
-# ----------------------------------------
-# Workarounds for problems building DLLs on Windows
-
-ifeq "$(TargetOS_CPP)" "mingw32"
-# We don't build the GHC package the dyn way on Windows, so
-# we can't build these packages the dyn way either. See trac #5987
-libraries/dph/dph-lifted-base_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-boxed_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-copy_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-vseg_dist-install_EXCLUDED_WAYS := dyn
-endif
-
 # -----------------------------------------------------------------------------
 # Include build instructions from all subdirs
 
@@ -689,7 +711,7 @@ $(shell echo "[]" >$(BOOTSTRAPPING_CONF))
 endif
 endif
 
-$(eval $(call clean-target,$(BOOTSTRAPPING_CONF),,$(BOOTSTRAPPING_CONF)))
+$(eval $(call clean-target,root,bootstrapping_conf,$(BOOTSTRAPPING_CONF)))
 
 # register the boot packages in strict sequence, because running
 # multiple ghc-pkgs in parallel doesn't work (registrations may get
@@ -884,8 +906,8 @@ install_packages: rts/package.conf.install
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" copy                        \
-	                                  "$(STRIP_CMD)"              \
 	                                  $p $(INSTALL_DISTDIR_$p)    \
+	                                  "$(STRIP_CMD)"              \
 	                                  '$(DESTDIR)'                \
 	                                  '$(prefix)'                 \
 	                                  '$(ghclibdir)'              \
@@ -894,10 +916,10 @@ install_packages: rts/package.conf.install
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" register                    \
+	                                  $p $(INSTALL_DISTDIR_$p)    \
 	                                  "$(INSTALLED_GHC_REAL)"     \
 	                                  "$(INSTALLED_GHC_PKG_REAL)" \
 	                                  "$(DESTDIR)$(topdir)"       \
-	                                  $p $(INSTALL_DISTDIR_$p)    \
 	                                  '$(DESTDIR)'                \
 	                                  '$(prefix)'                 \
 	                                  '$(ghclibdir)'              \
@@ -1062,7 +1084,7 @@ SRC_DIST_GHC_DIRS = mk rules docs distrib bindisttest libffi includes \
 SRC_DIST_GHC_FILES += \
     configure.ac config.guess config.sub configure \
     aclocal.m4 README ANNOUNCE HACKING LICENSE Makefile install-sh \
-    ghc.spec.in ghc.spec settings.in VERSION \
+    settings.in VERSION \
     boot packages ghc.mk
 
 VERSION :
@@ -1198,26 +1220,58 @@ clean_bindistprep:
 	$(call removeTrees,bindistprep/)
 
 distclean : clean
-	$(call removeFiles,config.cache config.status config.log mk/config.h mk/stamp-h)
-	$(call removeFiles,mk/config.mk mk/are-validating.mk mk/project.mk)
-	$(call removeFiles,mk/config.mk.old mk/project.mk.old)
-	$(call removeFiles,settings docs/users_guide/ug-book.xml)
-	$(call removeFiles,compiler/ghc.cabal compiler/ghc.cabal.old)
+# Clean the files that ./validate creates.
+	$(call removeFiles,mk/are-validating.mk)
+
+# Clean the files that we ask ./configure to create.
+	$(call removeFiles,mk/config.mk)
+	$(call removeFiles,mk/install.mk)
+	$(call removeFiles,mk/project.mk)
+	$(call removeFiles,compiler/ghc.cabal)
 	$(call removeFiles,ghc/ghc-bin.cabal)
+	$(call removeFiles,utils/runghc/runghc.cabal)
+	$(call removeFiles,settings)
+	$(call removeFiles,docs/users_guide/ug-book.xml)
+	$(call removeFiles,docs/users_guide/ug-ent.xml)
+	$(call removeFiles,docs/index.html)
+	$(call removeFiles,libraries/prologue.txt)
+	$(call removeFiles,distrib/configure.ac)
+
+# ./configure also makes these.
+	$(call removeFiles,mk/config.h)
+
+# Internal files generated by ./configure for itself.
+	$(call removeFiles,config.cache config.status config.log)
+
+# ./configure build ghc-pwd in utils/ghc-pwd/dist-boot, so clean it up.
+	$(call removeTrees,utils/ghc-pwd/dist-boot)
+
+# The root Makefile makes .old versions of some files that configure
+# generates, so we clean those too.
+	$(call removeFiles,mk/config.mk.old)
+	$(call removeFiles,mk/project.mk.old)
+	$(call removeFiles,compiler/ghc.cabal.old)
+
+# Clean the *Config.h files generated by library configure scripts
 	$(call removeFiles,libraries/base/include/HsBaseConfig.h)
 	$(call removeFiles,libraries/directory/include/HsDirectoryConfig.h)
 	$(call removeFiles,libraries/process/include/HsProcessConfig.h)
 	$(call removeFiles,libraries/unix/include/HsUnixConfig.h)
 	$(call removeFiles,libraries/old-time/include/HsTimeConfig.h)
-	$(call removeTrees,utils/ghc-pwd/dist-boot)
-	$(call removeTrees,includes/dist-derivedconstants)
-	$(call removeTrees,inplace)
+
+# The library configure scripts also like creating autom4te.cache
+# directories, so clean them all up.
 	$(call removeTrees,$(patsubst %, libraries/%/autom4te.cache, $(PACKAGES_STAGE1) $(PACKAGES_STAGE2)))
+
+# Not sure why this is being cleaned here.
+	$(call removeTrees,includes/dist-derivedconstants)
+
+# Finally, clean the inplace tree.
+	$(call removeTrees,inplace)
 
 maintainer-clean : distclean
 	$(call removeFiles,configure mk/config.h.in)
 	$(call removeTrees,autom4te.cache $(wildcard libraries/*/autom4te.cache))
-	$(call removeFiles,ghc.spec)
 	$(call removeFiles,$(patsubst %, libraries/%/GNUmakefile, \
 	        $(PACKAGES_STAGE1) $(PACKAGES_STAGE2)))
 	$(call removeFiles,$(patsubst %, libraries/%/ghc.mk, $(PACKAGES_STAGE1) $(PACKAGES_STAGE2)))
