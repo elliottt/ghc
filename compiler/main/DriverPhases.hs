@@ -172,7 +172,8 @@ nextPhase dflags p
 startPhase :: String -> Phase
 startPhase "lhs"      = Unlit HsSrcFile
 startPhase "lhs-boot" = Unlit HsBootFile
-startPhase "md"       = Unlit HsSrcFile
+startPhase "md"       = Unlit HsSrcFile -- should .md and .markdown contain some
+startPhase "markdown" = Unlit HsSrcFile -- extra flags for unlit?
 startPhase "hs"       = Cpp   HsSrcFile
 startPhase "hs-boot"  = Cpp   HsBootFile
 startPhase "hscpp"    = HsPp  HsSrcFile
@@ -236,7 +237,7 @@ haskellish_suffixes          = haskellish_src_suffixes ++ ["hc", "raw_s"]
 cish_suffixes                = [ "c", "cpp", "C", "cc", "cxx", "s", "S", "ll", "bc", "lm_s", "m", "M", "mm" ]
 extcoreish_suffixes          = [ "hcr" ]
 -- Will not be deleted as temp files:
-haskellish_user_src_suffixes = [ "hs", "lhs", "md", "hs-boot", "lhs-boot" ]
+haskellish_user_src_suffixes = [ "hs", "lhs", "md", "markdown", "hs-boot", "lhs-boot" ]
 
 objish_suffixes :: Platform -> [String]
 -- Use the appropriate suffix for the system on which
