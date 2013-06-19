@@ -56,10 +56,10 @@
 #define DISTINCTNAMES  "unlit: input and output filenames must differ\n"
 #define MISSINGENDCODE "unlit: missing \\end{code}\n"
 
-#define BEGINFENCE     "```haskell"
-#define LENBEGINFENCE  10
-#define ENDFENCE       "```"
-#define LENENDFENCE    3
+#define FENCE          "```"
+#define LENFENCE       3
+#define HFENCE         "```haskell"
+#define LENHFENCE      10
 
 #define BEGINCODE "\\begin{code}"
 #define LENBEGINCODE 12
@@ -233,7 +233,9 @@ line readline(FILE *istream, FILE *ostream) {
     else if (strcmp(buf, BEGINPSEUDOCODE) == 0)
 	return PSEUDO;
 #endif
-    else if (strncmp(buf, BEGINFENCE, LENBEGINFENCE) == 0)
+    else if (strncmp(buf, FENCE, LENFENCE) == 0)
+        return BEGIN;
+    else if (strncmp(buf, HFENCE, LENHFENCE) == 0)
         return BEGIN;
     else
 	return TEXT;
@@ -277,7 +279,7 @@ void unlit(char *file, FILE *istream, FILE *ostream)
 		if (strncmp(lineb,ENDCODE,LENENDCODE) == 0) {
 		    myputc('\n', ostream);
 		    break;
-		} else if(strncmp(lineb,ENDFENCE,LENENDFENCE) == 0) {
+		} else if(strncmp(lineb,FENCE,LENFENCE) == 0) {
                     myputc('\n', ostream);
                     break;
                 }
