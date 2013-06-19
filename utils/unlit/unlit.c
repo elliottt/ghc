@@ -235,8 +235,6 @@ line readline(FILE *istream, FILE *ostream) {
 #endif
     else if (strncmp(buf, BEGINFENCE, LENBEGINFENCE) == 0)
         return BEGIN;
-    else if (strncmp(buf, "    ", 4) == 0)
-        return DEFN;
     else
 	return TEXT;
 }
