@@ -48,6 +48,7 @@ import System.FilePath
    compilation system     | ``start here''| ``stop after''| output file
 
    literate pre-processor | .lhs          | -             | -
+   haskell markdown       | .md           | -             | -
    C pre-processor (opt.) | -             | -E            | -
    Haskell compiler       | .hs           | -C, -S        | .hc, .s
    C compiler (opt.)      | .hc or .c     | -S            | .s
@@ -171,6 +172,7 @@ nextPhase dflags p
 startPhase :: String -> Phase
 startPhase "lhs"      = Unlit HsSrcFile
 startPhase "lhs-boot" = Unlit HsBootFile
+startPhase "md"       = Unlit HsSrcFile
 startPhase "hs"       = Cpp   HsSrcFile
 startPhase "hs-boot"  = Cpp   HsBootFile
 startPhase "hscpp"    = HsPp  HsSrcFile
@@ -234,7 +236,7 @@ haskellish_suffixes          = haskellish_src_suffixes ++ ["hc", "raw_s"]
 cish_suffixes                = [ "c", "cpp", "C", "cc", "cxx", "s", "S", "ll", "bc", "lm_s", "m", "M", "mm" ]
 extcoreish_suffixes          = [ "hcr" ]
 -- Will not be deleted as temp files:
-haskellish_user_src_suffixes = [ "hs", "lhs", "hs-boot", "lhs-boot" ]
+haskellish_user_src_suffixes = [ "hs", "lhs", "md", "hs-boot", "lhs-boot" ]
 
 objish_suffixes :: Platform -> [String]
 -- Use the appropriate suffix for the system on which
