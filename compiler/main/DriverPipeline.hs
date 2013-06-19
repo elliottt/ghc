@@ -820,11 +820,16 @@ runPhase (RealPhase (Unlit sf)) input_fn dflags
   = do
        output_fn <- phaseOutputFilename (Cpp sf)
 
-       let flags = [ -- The -h option passes the file name for unlit to
+       let ext   = takeExtension input_fn
+           flags = [ -- The -h option passes the file name for unlit to
                      -- put in a #line directive
                      SysTools.Option     "-h"
                    , SysTools.Option $ escape $ normalise input_fn
-                   , SysTools.FileOption "" input_fn
+                   ] ++
+                   [ SysTools.Option flag | flag <- ["-r", "-#"]
+                                          , ext `elem` [".md", ".markdown"]
+                   ] ++
+                   [ SysTools.FileOption "" input_fn
                    , SysTools.FileOption "" output_fn
                    ]
 

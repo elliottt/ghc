@@ -49,7 +49,7 @@
 #define DEFNCHAR       '>'
 #define MISSINGBLANK   "unlit: Program line next to comment"
 #define EMPTYSCRIPT    "unlit: No definitions in file (perhaps you forgot the '>'s?)"
-#define USAGE          "usage: unlit [-q] [-n] [-c] [-#] [-P] [-h label] file1 file2\n"
+#define USAGE          "usage: unlit [-q] [-r] [-n] [-c] [-#] [-P] [-h label] file1 file2\n"
 #define CANNOTOPEN     "unlit: cannot open \"%s\"\n"
 #define CANNOTWRITE    "unlit: error writing \"%s\"\n"
 #define CANNOTWRITESTDOUT "unlit: error writing standard output\n"
@@ -330,6 +330,8 @@ int main(int argc,char **argv)
     for (argc--, argv++; argc > 0; argc--, argv++)
         if (strcmp(*argv,"-n")==0)
             noisy = 1;
+        else if (strcmp(*argv,"-r")==0)
+            leavecpp = 0;
         else if (strcmp(*argv,"-q")==0)
             noisy = 0;
         else if (strcmp(*argv,"-c")==0)
