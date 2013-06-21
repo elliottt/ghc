@@ -410,16 +410,16 @@ data TyCon
                                            --   holds the name of the imported thing
     }
 
-  -- | Represents promoted data constructor.
+  -- | Represents promoted data constructor or type constructors introduced by a
+  -- 'data kind' declaration.
   | PromotedDataCon {         -- See Note [Promoted data constructors]
-        tyConUnique :: Unique, -- ^ Same Unique as the data constructor
-        tyConName   :: Name,   -- ^ Same Name as the data constructor
+        tyConUnique :: Unique, -- ^ For promoted data cons, same Unique as the data constructor
+        tyConName   :: Name,   -- ^ For promoted data cons, same Name as the data constructor
         tyConArity  :: Arity,
         tc_kind     :: Kind,   -- ^ Translated type of the data constructor
-        parentTyCon :: TyCon   -- ^ Corresponding parent type constructor.  For
-                               --   real promoted data cons, this is the type
-                               --   definition.  For data kind definitions, this is the
-                               --   kind definition.
+        parentTyCon :: TyCon   -- ^ Corresponding parent LHS constructor.
+                               --   Type constructor for the promoted case, kind
+                               --   constructor for the 'data kind' case.
     }
 
   -- | Represents promoted type constructor.
