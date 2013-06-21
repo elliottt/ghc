@@ -389,7 +389,6 @@ BIN_DIST_PREP_DIR     = bindistprep/$(BIN_DIST_NAME)
 BIN_DIST_PREP_TAR     = bindistprep/$(BIN_DIST_NAME)-$(TARGETPLATFORM).tar
 BIN_DIST_PREP_TAR_BZ2 = $(BIN_DIST_PREP_TAR).bz2
 BIN_DIST_TAR_BZ2      = $(BIN_DIST_NAME)-$(TARGETPLATFORM).tar.bz2
-BIN_DIST_LIST         = bindist-list
 
 # -----------------------------------------------------------------------------
 # Utilities programs: flags 
@@ -617,7 +616,12 @@ CPP			= @CPP@ @CPPFLAGS@
 # RAWCPP_FLAGS are the flags to give to cpp (viz, gcc -E) to persuade it to
 # behave plausibly on Haskell sources.
 #
+# Clang in particular is a bit more annoying, so we suppress some warnings.
 RAWCPP_FLAGS            = -undef -traditional
+ifeq "$(CC_CLANG_BACKEND)" "1"
+RAWCPP_FLAGS           += -Wno-invalid-pp-token
+endif
+
 FIND			= @FindCmd@
 
 #
