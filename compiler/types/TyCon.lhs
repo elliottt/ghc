@@ -37,7 +37,7 @@ module TyCon(
         isFunTyCon,
         isPrimTyCon,
         isTupleTyCon, isUnboxedTupleTyCon, isBoxedTupleTyCon,
-        isSynTyCon, isOpenSynFamilyTyCon,
+        isSynTyCon, 
         isDecomposableTyCon,
         isForeignTyCon, 
         isPromotedDataCon, isPromotedTyCon,
@@ -50,7 +50,9 @@ module TyCon(
         isDataTyCon, isProductTyCon, isDataProductTyCon_maybe,
         isEnumerationTyCon,
         isNewTyCon, isAbstractTyCon,
-        isFamilyTyCon, isSynFamilyTyCon, isDataFamilyTyCon,
+        isFamilyTyCon, isOpenFamilyTyCon,
+        isSynFamilyTyCon, isDataFamilyTyCon,
+        isOpenSynFamilyTyCon, isClosedSynFamilyTyCon_maybe,
         isUnLiftedTyCon,
         isGadtSyntaxTyCon, isDistinctTyCon, isDistinctAlgRhs,
         isTyConAssoc, tyConAssoc_maybe,
@@ -147,17 +149,19 @@ Note [Type synonym families]
 * Translation of type family decl:
         type family F a :: *
   translates to
-    a SynTyCon 'F', whose SynTyConRhs is SynFamilyTyCon
+    a SynTyCon 'F', whose SynTyConRhs is OpenSynFamilyTyCon
 
-* Translation of type family decl:
-        type family F a :: *
+        type family G a :: * where
+          G Int = Bool
+          G Bool = Char
+          G a = ()
   translates to
-    a SynTyCon 'F', whose SynTyConRhs is SynFamilyTyCon
+    a SynTyCon 'G', whose SynTyConRhs is ClosedSynFamilyTyCon, with the
+    appropriate CoAxiom representing the equations
 
 * In the future we might want to support
-    * closed type families (esp when we have proper kinds)
     * injective type families (allow decomposition)
-  but we don't at the moment [2010]
+  but we don't at the moment [2013]
 
 Note [Data type families]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -379,7 +383,7 @@ data TyCon
 
         tyConTyVars  :: [TyVar],        -- Bound tyvars
 
-        synTcRhs     :: SynTyConRhs Type,  -- ^ Contains information about the
+        synTcRhs     :: SynTyConRhs,       -- ^ Contains information about the
                                            -- expansion of the synonym
 
         synTcParent  :: TyConParent     -- ^ Gives the family declaration 'TyCon'
@@ -618,18 +622,19 @@ isNoParent _             = False
 --------------------
 
 -- | Information pertaining to the expansion of a type synonym (@type@)
-data SynTyConRhs ty
+data SynTyConRhs
   = -- | An ordinary type synonyn.
     SynonymTyCon
-       ty             -- This 'Type' is the rhs, and may mention from 'tyConTyVars'.
+       Type           -- This 'Type' is the rhs, and may mention from 'tyConTyVars'.
                       -- It acts as a template for the expansion when the 'TyCon'
                       -- is applied to some types.
 
-   -- | A type synonym family  e.g. @type family F x y :: * -> *@
-   | SynFamilyTyCon {
-        synf_open :: Bool,         -- See Note [Closed type families]
-        synf_injective :: Bool 
-     }
+   -- | An open type synonym family  e.g. @type family F x y :: * -> *@
+   | OpenSynFamilyTyCon 
+
+   -- | A closed type synonym family  e.g. @type family F x where { F Int = Bool }@
+   | ClosedSynFamilyTyCon
+       (CoAxiom Branched) -- The one axiom for this family
 \end{code}
 
 Note [Closed type families]
@@ -637,8 +642,9 @@ Note [Closed type families]
 * In an open type family you can add new instances later.  This is the 
   usual case.  
 
-* In a closed type family you can only put instnaces where the family
-  is defined.  GHC doesn't support syntax for this yet.
+* In a closed type family you can only put equations where the family
+  is defined.
+
 
 Note [Promoted data constructors]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1011,7 +1017,7 @@ mkPrimTyCon' name kind arity rep is_unlifted
     }
 
 -- | Create a type synonym 'TyCon'
-mkSynTyCon :: Name -> Kind -> [TyVar] -> SynTyConRhs Type -> TyConParent -> TyCon
+mkSynTyCon :: Name -> Kind -> [TyVar] -> SynTyConRhs -> TyConParent -> TyCon
 mkSynTyCon name kind tyvars rhs parent
   = SynTyCon {
         tyConName = name,
@@ -1208,20 +1214,34 @@ isEnumerationTyCon (AlgTyCon {algTcRhs = DataTyCon { is_enum = res }}) = res
 isEnumerationTyCon (TupleTyCon {tyConArity = arity}) = arity == 0
 isEnumerationTyCon _                                                   = False
 
--- | Is this a 'TyCon', synonym or otherwise, that may have further instances appear?
+-- | Is this a 'TyCon', synonym or otherwise, that defines a family?
 isFamilyTyCon :: TyCon -> Bool
-isFamilyTyCon (SynTyCon {synTcRhs = SynFamilyTyCon {}})  = True
-isFamilyTyCon (AlgTyCon {algTcRhs = DataFamilyTyCon {}}) = True
+isFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon })      = True
+isFamilyTyCon (SynTyCon {synTcRhs = ClosedSynFamilyTyCon {} }) = True
+isFamilyTyCon (AlgTyCon {algTcRhs = DataFamilyTyCon {}})       = True
 isFamilyTyCon _ = False
+
+-- | Is this a 'TyCon', synonym or otherwise, that defines an family with
+-- instances?
+isOpenFamilyTyCon :: TyCon -> Bool
+isOpenFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon }) = True
+isOpenFamilyTyCon (AlgTyCon {algTcRhs = DataFamilyTyCon })    = True
+isOpenFamilyTyCon _ = False
 
 -- | Is this a synonym 'TyCon' that can have may have further instances appear?
 isSynFamilyTyCon :: TyCon -> Bool
-isSynFamilyTyCon (SynTyCon {synTcRhs = SynFamilyTyCon {}}) = True
+isSynFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon {}})   = True
+isSynFamilyTyCon (SynTyCon {synTcRhs = ClosedSynFamilyTyCon {}}) = True
 isSynFamilyTyCon _ = False
 
 isOpenSynFamilyTyCon :: TyCon -> Bool
-isOpenSynFamilyTyCon (SynTyCon {synTcRhs = SynFamilyTyCon { synf_open = is_open } }) = is_open
+isOpenSynFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon }) = True
 isOpenSynFamilyTyCon _ = False
+
+isClosedSynFamilyTyCon_maybe :: TyCon -> Maybe (CoAxiom Branched)
+isClosedSynFamilyTyCon_maybe
+  (SynTyCon {synTcRhs = ClosedSynFamilyTyCon ax}) = Just ax
+isClosedSynFamilyTyCon_maybe _ = Nothing
 
 -- | Is this a synonym 'TyCon' that can have may have further instances appear?
 isDataFamilyTyCon :: TyCon -> Bool
@@ -1505,7 +1525,7 @@ synTyConDefn_maybe (SynTyCon {tyConTyVars = tyvars, synTcRhs = SynonymTyCon ty})
 synTyConDefn_maybe _ = Nothing
 
 -- | Extract the information pertaining to the right hand side of a type synonym (@type@) declaration.
-synTyConRhs_maybe :: TyCon -> Maybe (SynTyConRhs Type)
+synTyConRhs_maybe :: TyCon -> Maybe SynTyConRhs
 synTyConRhs_maybe (SynTyCon {synTcRhs = rhs}) = Just rhs
 synTyConRhs_maybe _                           = Nothing
 \end{code}
