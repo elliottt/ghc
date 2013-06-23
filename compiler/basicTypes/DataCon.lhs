@@ -1000,7 +1000,7 @@ buildAlgTyCon :: Name
 	      -> ThetaType	       -- ^ Stupid theta
 	      -> AlgTyConRhs
 	      -> RecFlag
-              -> PromotionFlavor ()
+              -> PromotionInfo ()
 	      -> Bool		       -- ^ True <=> was declared in GADT syntax
               -> TyConParent
 	      -> TyCon

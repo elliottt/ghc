@@ -14,8 +14,8 @@ module TyCon(
         AlgTyConRhs(..), visibleDataCons,
         TyConParent(..), isNoParent,
         SynTyConRhs(..), 
-        PromotionFlavor(..),
-        PromotionInfo,
+        PromotionInfo(..),
+        PromotionFlavor,
 
         -- ** Constructing TyCons
         mkAlgTyCon,
@@ -358,7 +358,7 @@ data TyCon
                                         -- or family instances, respectively.
                                         -- See also 'synTcParent'
         
-        tcPromoted :: PromotionInfo -- ^ Promoted TyCon, if any
+        tcPromoted :: PromotionFlavor -- ^ Promoted TyCon, if any
     }
 
   -- | Represents the infinite family of tuple type constructors,
@@ -371,7 +371,7 @@ data TyCon
         tyConTupleSort :: TupleSort,
         tyConTyVars    :: [TyVar],
         dataCon        :: DataCon, -- ^ Corresponding tuple data constructor
-        tcPromoted     :: PromotionInfo -- Nothing for unboxed tuples
+        tcPromoted     :: PromotionFlavor -- Nothing for unboxed tuples
     }
 
   -- | Represents type synonyms
@@ -443,16 +443,16 @@ type KCon = TyCon
 -- | Names of the fields in an algebraic record type
 type FieldLabel = Name
 
-type PromotionInfo = PromotionFlavor TyCon
+type PromotionFlavor = PromotionInfo TyCon
 
 -- | How promotion should operate for an AlgTyCon.
-data PromotionFlavor con
+data PromotionInfo con
   = NeverPromote     -- ^ Promotion is explicitly disabled by 'data type' syntax
   | NotPromotable    -- ^ Promotion is not possible
   | Promotable con   -- ^ Promotion is possible, use this con
     deriving (Typeable)
 
-instance Functor PromotionFlavor where
+instance Functor PromotionInfo where
   fmap f p = case p of
     Promotable a  -> Promotable (f a)
     NeverPromote  -> NeverPromote
@@ -923,7 +923,7 @@ mkAlgTyCon :: Name
            -> TyConParent
            -> RecFlag           -- ^ Is the 'TyCon' recursive?
            -> Bool              -- ^ Was the 'TyCon' declared with GADT syntax?
-           -> PromotionInfo     -- ^ Promoted version
+           -> PromotionFlavor   -- ^ Promoted version
            -> TyCon
 mkAlgTyCon name kind tyvars cType stupid rhs parent is_rec gadt_syn prom_info
   = AlgTyCon {
@@ -954,7 +954,7 @@ mkTupleTyCon :: Name
              -> [TyVar] -- ^ 'TyVar's scoped over: see 'tyConTyVars'
              -> DataCon
              -> TupleSort    -- ^ Whether the tuple is boxed or unboxed
-             -> PromotionInfo-- ^ Promoted version
+             -> PromotionFlavor -- ^ Promoted version
              -> TyCon
 mkTupleTyCon name kind arity tyvars con sort prom_info
   = TupleTyCon {
@@ -1321,7 +1321,7 @@ isRecursiveTyCon :: TyCon -> Bool
 isRecursiveTyCon (AlgTyCon {algTcRec = Recursive}) = True
 isRecursiveTyCon _                                 = False
 
-promotableTyConInfo :: TyCon -> PromotionInfo
+promotableTyConInfo :: TyCon -> PromotionFlavor
 promotableTyConInfo (AlgTyCon { tcPromoted = prom })   = prom
 promotableTyConInfo (TupleTyCon { tcPromoted = prom }) = prom
 promotableTyConInfo _                                  = NotPromotable

@@ -1320,7 +1320,7 @@ instance Binary IfaceDecl where
                     return (IfaceDataKind occ a2 a3 a4)
             _ -> error ("Binary.get(TyClDecl): Unknown tag " ++ show h)
 
-instance Binary (PromotionFlavor ()) where
+instance Binary (PromotionInfo ()) where
   put_ bh p = case p of
     NeverPromote  -> putByte bh 0x0
     NotPromotable -> putByte bh 0x1
