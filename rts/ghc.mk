@@ -203,6 +203,7 @@ $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/dist/libs.depend $$(
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
 	  -no-auto-link-packages $$(LIBFFI_LIBS) `cat rts/dist/libs.depend` $$(rts_$1_OBJS) \
 	  $$(rts_$1_DTRACE_OBJS) -o $$@
+	$(call relative-dynlib-references,rts,dist,1)
 endif
 else
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
@@ -423,7 +424,9 @@ rts/win32/ThrIOManager_CC_OPTS += -w
 # for details
 
 # Without this, thread_obj will not be inlined (at least on x86 with GCC 4.1.0)
+ifneq "$(CC_CLANG_BACKEND)" "1"
 rts/sm/Compact_CC_OPTS += -finline-limit=2500
+endif
 
 # -O3 helps unroll some loops (especially in copy() with a constant argument).
 rts/sm/Evac_CC_OPTS += -funroll-loops

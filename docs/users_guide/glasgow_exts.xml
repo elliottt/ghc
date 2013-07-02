@@ -922,14 +922,14 @@ As you can guess <literal>justOnes</literal> will evaluate to <literal>Just [-1,
     to the underlying monadic value-recursion operator <literal>mfix</literal>, belonging to the
     <literal>MonadFix</literal> class. Here is an example:
 <programlisting>
-rec { b &lt;- f a c     ===>    (b,c) &lt;- mfix (\~(b,c) -> do { b &lt;- f a c
-    ; c &lt;- f b a }                                        ; c &lt;- f b a
-                                                          ; return (b,c) })
+rec { b &lt;- f a c     ===>    (b,c) &lt;- mfix (\ ~(b,c) -> do { b &lt;- f a c
+    ; c &lt;- f b a }                                         ; c &lt;- f b a
+                                                           ; return (b,c) })
 </programlisting>
    As usual, the meta-variables <literal>b</literal>, <literal>c</literal> etc., can be arbitrary patterns.
    In general, the statement <literal>rec <replaceable>ss</replaceable></literal> is desugared to the statement
 <programlisting>
-<replaceable>vs</replaceable> &lt;- mfix (\~<replaceable>vs</replaceable> -&gt; do { <replaceable>ss</replaceable>; return <replaceable>vs</replaceable> })
+<replaceable>vs</replaceable> &lt;- mfix (\ ~<replaceable>vs</replaceable> -&gt; do { <replaceable>ss</replaceable>; return <replaceable>vs</replaceable> })
 </programlisting>
   where <replaceable>vs</replaceable> is a tuple of the variables bound by <replaceable>ss</replaceable>.
 </para>
@@ -2284,10 +2284,10 @@ to be written infix, very much like expressions.  More specifically:
   </para></listitem>
 <listitem><para>
   Types, and class constraints, can be written infix.  For example
-  <screen>
-	x :: Int :*: Bool
-        f :: (a :=: b) => a -> b
-  </screen>
+<screen>
+  x :: Int :*: Bool
+  f :: (a :=: b) => a -> b
+</screen>
   </para></listitem>
 <listitem><para>
   Back-quotes work
@@ -2309,6 +2309,56 @@ to be written infix, very much like expressions.  More specifically:
   Function arrow is <literal>infixr</literal> with fixity 0.  (This might change; I'm not sure what it should be.)
   </para></listitem>
 
+</itemizedlist>
+</para>
+</sect2>
+
+<sect2 id="type-operators">
+<title>Type operators</title>
+<para>
+In types, an operator symbol like <literal>(+)</literal> is normally treated as a type
+<emphasis>variable</emphasis>, just like <literal>a</literal>.  Thus in Haskell 98 you can say
+<programlisting>
+type T (+) = ((+), (+))
+-- Just like: type T a = (a,a)
+
+f :: T Int -> Int
+f (x,y)= x
+</programlisting>
+As you can see, using operators in this way is not very useful, and Haskell 98 does not even
+allow you to write them infix.
+</para>
+<para>
+The language <option>-XTypeOperators</option> changes this behaviour:
+<itemizedlist>
+<listitem><para>
+Operator symbols become type <emphasis>constructors</emphasis> rather than 
+type <emphasis>variables</emphasis>.
+</para></listitem>
+<listitem><para>
+Operator symbols in types can be written infix, both in definitions and uses. 
+for example:
+<programlisting>
+data a + b = Plus a b
+type Foo = Int + Bool
+</programlisting>
+</para></listitem>
+<listitem><para>
+There is now some potential ambiguity in import and export lists; for example
+if you write <literal>import M( (+) )</literal> do you mean the 
+<emphasis>function</emphasis> <literal>(+)</literal> or the 
+<emphasis>type constructor</emphasis> <literal>(+)</literal>?
+The default is the former, but GHC allows you to specify the latter
+by preceding it with the keyword <literal>type</literal>, thus:
+<programlisting>
+import M( type (+) )
+</programlisting>
+</para></listitem>
+<listitem><para>
+The fixity of a type operator may be set using the usual fixity declarations
+but, as in <xref linkend="infix-tycons"/>, the function and type constructor share
+a single fixity.
+</para></listitem>
 </itemizedlist>
 </para>
 </sect2>
@@ -4872,7 +4922,7 @@ representation).</para>
 <title>Type families</title>
 
 <para>
-  <firstterm>Indexed type families</firstterm> are a new GHC extension to
+  <firstterm>Indexed type families</firstterm> form an extension to
   facilitate type-level
   programming. Type families are a generalisation of <firstterm>associated
   data types</firstterm>
@@ -4915,11 +4965,11 @@ representation).</para>
   indices.
 </para>
 <para>
-  Indexed type families come in two flavours: <firstterm>data
-    families</firstterm> and <firstterm>type synonym
-    families</firstterm>. They are the indexed family variants of algebraic
-  data types and type synonyms, respectively. The instances of data families
-  can be data types and newtypes.
+  Indexed type families come in three flavours: <firstterm>data
+  families</firstterm>, <firstterm>open type synonym families</firstterm>, and
+  <firstterm>closed type synonym families</firstterm>. They are the indexed
+  family variants of algebraic data types and type synonyms, respectively. The
+  instances of data families can be data types and newtypes.
 </para>
 <para>
   Type families are enabled by the flag <option>-XTypeFamilies</option>.
@@ -5027,7 +5077,7 @@ data instance G [a] b where
     </para>
 
     <para>
-      Even if type families are defined as toplevel declarations, functions
+      Even if data families are defined as toplevel declarations, functions
       that perform different computations for different family instances may still
       need to be defined as methods of type classes.  In particular, the
       following is not possible:
@@ -5073,22 +5123,24 @@ instance Foo Char where
   <title>Synonym families</title>
 
   <para>
-    Type families appear in two flavours: (1) they can be defined on the
-    toplevel or (2) they can appear inside type classes (in which case they
-    are known as associated type synonyms).  The former is the more general
-    variant, as it lacks the requirement for the type-indexes to coincide with
-    the class parameters.  However, the latter can lead to more clearly
-    structured code and compiler warnings if some type instances were -
-    possibly accidentally - omitted.  In the following, we always discuss the
-    general toplevel form first and then cover the additional constraints
-    placed on associated types.
+    Type families appear in three flavours: (1) they can be defined as open
+    families on the toplevel, (2) they can be defined as closed families on
+    the toplevel, or (3) they can appear inside type classes (in which case
+    they are known as associated type synonyms). Toplevel families are more
+    general, as they lack the requirement for the type-indexes to coincide
+    with the class parameters. However, associated type synonyms can lead to
+    more clearly structured code and compiler warnings if some type instances
+    were - possibly accidentally - omitted. In the following, we always
+    discuss the general toplevel forms first and then cover the additional
+    constraints placed on associated types. Note that closed associated type
+    synonyms do not exist.
   </para>
 
   <sect3 id="type-family-declarations">
     <title>Type family declarations</title>
 
     <para>
-      Indexed type families are introduced by a signature, such as
+      Open indexed type families are introduced by a signature, such as
 <programlisting>
 type family Elem c :: *
 </programlisting>
@@ -5124,12 +5176,7 @@ F Bool             -- WRONG: unsaturated application
   <sect3 id="type-instance-declarations">
     <title>Type instance declarations</title>
     <para>
-      There are two forms of type family instance declaration: unbranched and
-      branched. Branched instances list any number of alternatives, to be
-      checked in order from top to bottom, similarly to normal function
-      declarations. Unbranched instances supply only one left-hand side.
-
-      Unbranched instance declarations of type families are very similar to
+      Instance declarations of type families are very similar to
       standard type synonym declarations. The only two differences are that
       the keyword <literal>type</literal> is followed by
       <literal>instance</literal> and that some or all of the type arguments
@@ -5145,35 +5192,6 @@ type instance Elem [e] = e
     </para>
 
     <para>
-      Branched instance declarations, on the other hand, allow many different
-      left-hand-side type patterns. These patterns are tried in order, from
-      top to bottom, when simplifying a type family application. A branched instance
-      declaration is introduced by <literal>type instance where</literal>. For example:
-<programlisting>
-type instance where
-  F Int  = Double
-  F Bool = Char
-  F a    = String
-</programlisting>
-      In this example, we declare an instance for <literal>F</literal> such
-      that <literal>F Int</literal> simplifies to <literal>Double</literal>,
-      <literal>F Bool</literal> simplifies to <literal>Char</literal>, and for
-      any other type <literal>a</literal> that is known not to be
-      <literal>Int</literal> or <literal>Bool</literal>, <literal>F
-      a</literal> simplifies to <literal>String</literal>. Note that GHC must
-      be sure that <literal>a</literal> cannot unify with
-      <literal>Int</literal> or <literal>Bool</literal> in that last case; if
-      a programmer specifies just <literal>F a</literal> in their code, GHC will
-      not be able to simplify the type. After all, <literal>a</literal> might later
-      be instantiated with <literal>Int</literal>.
-    </para>
-
-    <para>
-      Branched instances and unbranched instances may be mixed freely for the same
-      type family.
-    </para>
-
-    <para>
       Type family instance declarations are only legitimate when an
       appropriate family declaration is in scope - just like class instances
       require the class declaration to be visible. Moreover, each instance
@@ -5183,7 +5201,46 @@ type instance where
       declaration. Finally, the right-hand side of a type instance must be a
       monotype (i.e., it may not include foralls) and after the expansion of
       all saturated vanilla type synonyms, no synonyms, except family synonyms
-      may remain. Here are some examples of admissible and illegal type
+      may remain.
+    </para>
+  </sect3>
+
+  <sect3 id="closed-type-families">
+    <title>Closed type families</title>
+    <para>
+      A type family can also be declared with a <literal>where</literal> clause,
+      defining the full set of equations for that family. For example:
+<programlisting>
+type family F a where
+  F Int  = Double
+  F Bool = Char
+  F a    = String
+</programlisting>
+      A closed type family's equations are tried in order, from top to bottom,
+      when simplifying a type family application. In this example, we declare
+      an instance for <literal>F</literal> such that <literal>F Int</literal>
+      simplifies to <literal>Double</literal>, <literal>F Bool</literal>
+      simplifies to <literal>Char</literal>, and for any other type
+      <literal>a</literal> that is known not to be <literal>Int</literal> or
+      <literal>Bool</literal>, <literal>F a</literal> simplifies to
+      <literal>String</literal>. Note that GHC must be sure that
+      <literal>a</literal> cannot unify with <literal>Int</literal> or
+      <literal>Bool</literal> in that last case; if a programmer specifies
+      just <literal>F a</literal> in their code, GHC will not be able to
+      simplify the type. After all, <literal>a</literal> might later be
+      instantiated with <literal>Int</literal>.
+    </para>
+
+    <para>
+      A closed type family's equations have the same restrictions as the
+      equations for an open type family instances.
+    </para>
+  </sect3>
+
+  <sect3 id="type-family-examples">
+    <title>Type family examples</title>
+    <para>
+Here are some examples of admissible and illegal type
       instances:
 <programlisting>
 type family F a :: *
@@ -5192,13 +5249,11 @@ type instance F String             = Char        -- OK!
 type instance F (F a)              = a           -- WRONG: type parameter mentions a type family
 type instance F (forall a. (a, b)) = b           -- WRONG: a forall type appears in a type parameter
 type instance F Float              = forall a.a  -- WRONG: right-hand side may not be a forall type
-type instance where                              -- OK!
-  F (Maybe Int)  = Int
-  F (Maybe Bool) = Bool
-  F (Maybe a)    = String
-type instance where            -- WRONG: conflicts with earlier instances (see below)
-  F Int = Float
-  F a   = [a]
+type family H a where                            -- OK!
+  H Int  = Int
+  H Bool = Bool
+  H a    = String
+type instance H Char = Char       -- WRONG: cannot have instances of closed family
 
 type family G a b :: * -> *
 type instance G Int            = (,)     -- WRONG: must be two type parameters
@@ -5207,35 +5262,83 @@ type instance G Int Char Float = Double  -- WRONG: must be two type parameters
     </para>
     </sect3>
     <sect3 id="type-family-overlap">
-      <title>Overlap of type synonym instances</title>
+      <title>Compatibility and apartness of type family equations</title>
       <para>
-	The unbranched instance declarations of a type family used in a single
-	program may only overlap if the right-hand sides of the overlapping
-	instances coincide for the overlapping types. More formally, two
-	instance declarations overlap if there is a substitution that makes
-	the left-hand sides of the instances syntactically the same. Whenever
-	that is the case, if the instances are unbranched, the right-hand
-	sides of the instances must also be syntactically equal under the same
-	substitution. This condition is independent of whether the type family
-	is associated or not, and it is not only a matter of consistency, but
-	one of type safety. Branched instances are not permitted to overlap
-	with any other instances, branched or unbranched.
+        There must be some restrictions on the equations of type families, lest
+	we define an ambiguous rewrite system. So, equations of open type families
+	are restricted to be <firstterm>compatible</firstterm>. Two type patterns
+	are compatible if
+<orderedlist>
+<listitem><para>all corresponding types in the patterns are <firstterm>apart</firstterm>, or</para></listitem>
+<listitem><para>the two patterns unify producing a substitution, and the right-hand sides are equal under that substitution.</para></listitem>
+</orderedlist>
+        Two types are considered <firstterm>apart</firstterm> if, for all possible
+	substitutions, the types cannot reduce to a common reduct.
       </para>
+
       <para>
-	Here are two example to illustrate the condition under which overlap
-	is permitted.
+	The first clause of "compatible" is the more straightforward one. It says
+	that the patterns of two distinct type family instances cannot overlap.
+	For example, the following is disallowed:
+<programlisting>
+type instance F Int = Bool
+type instance F Int = Char
+</programlisting>
+        The second clause is a little more interesting. It says that two
+        overlapping type family instances are allowed if the right-hand
+	sides coincide in the region of overlap. Some examples help here:
 <programlisting>
 type instance F (a, Int) = [a]
 type instance F (Int, b) = [b]   -- overlap permitted
 
 type instance G (a, Int)  = [a]
 type instance G (Char, a) = [a]  -- ILLEGAL overlap, as [Char] /= [Int]
-
-type instance H Int = Int
-type instance where              -- ILLEGAL overlap, as branched instances may not overlap
-  H a = a
 </programlisting>
-      </para>
+	Note that this compatibility condition is independent of whether the type family
+	is associated or not, and it is not only a matter of consistency, but
+	one of type safety. </para>
+
+	<para>
+	  The definition for "compatible" uses a notion of "apart", whose definition
+	  in turn relies on type family reduction. This condition of "apartness", as
+	  stated, is impossible to check, so we use this conservative approximation:
+	  two types are considered to be apart when the two types cannot be unified,
+	  even by a potentially infinite unifier. Allowing the unifier to be infinite
+	  disallows the following pair of instances:
+<programlisting>
+type instance H x   x = Int
+type instance H [x] x = Bool
+</programlisting>
+          The type patterns in this pair equal if <literal>x</literal> is replaced
+	  by an infinite nesting of lists. Rejecting instances such as these is
+	  necessary for type soundness.
+	</para>
+
+	<para>
+	  Compatibility also affects closed type families. When simplifying an
+	  application of a closed type family, GHC will select an equation only
+	  when it is sure that no incompatible previous equation will ever apply.
+	  Here are some examples:
+<programlisting>
+type family F a where
+  F Int = Bool
+  F a   = Char
+
+type family G a where
+  G Int = Int
+  G a   = a
+</programlisting>
+          In the definition for <literal>F</literal>, the two equations are
+          incompatible -- their patterns are not apart, and yet their
+          right-hand sides do not coincide. Thus, before GHC selects the
+          second equation, it must be sure that the first can never apply. So,
+          the type <literal>F a</literal> does not simplify; only a type such
+          as <literal>F Double</literal> will simplify to
+          <literal>Char</literal>. In <literal>G</literal>, on the other hand,
+          the two equations are compatible. Thus, GHC can ignore the first
+          equation when looking at the second. So, <literal>G a</literal> will
+          simplify to <literal>a</literal>.</para>
+
     <para> However see <xref linkend="ghci-decls"/> for the overlap rules in GHCi.</para>
     </sect3>
 
@@ -5365,10 +5468,6 @@ instance GMapKey Flob where
         <literal>(GMap Flob ...)</literal>, this facility is most useful when
         the free indexed parameter is of a kind with a finite number of alternatives
         (unlike <literal>*</literal>).
-      </para>
-
-      <para>
-	Branched associated type instances are not currently supported.
       </para>
     </sect3>
 
@@ -5714,7 +5813,7 @@ very convenient, and it is not clear what the syntax for explicit quantification
 </para>
 </sect2>
 
-<sect2> <title>Polymorphic kind recursion and complete kind signatures</title>
+<sect2 id="complete-kind-signatures"> <title>Polymorphic kind recursion and complete kind signatures</title>
 
 <para>
 Just as in type inference, kind inference for recursive types can only use <emphasis>monomorphic</emphasis> recursion.
@@ -5759,19 +5858,59 @@ you must use GADT syntax.
 </para></listitem>
 
 <listitem><para>
-A type or data family declaration <emphasis>always</emphasis> have a
+An open type or data family declaration <emphasis>always</emphasis> has a
 complete user-specified kind signature; no "<literal>::</literal>" is required:
 <programlisting>
 data family D1 a           	-- D1 :: * -> *
 data family D2 (a :: k)    	-- D2 :: forall k. k -> *
 data family D3 (a :: k) :: *    -- D3 :: forall k. k -> *
 type family S1 a :: k -> *      -- S1 :: forall k. * -> k -> *
+
+class C a where                 -- C  :: k -> Constraint
+  type AT a b                   -- AT :: k -> * -> *
 </programlisting>
+In the last example, the variable <literal>a</literal> has an implicit kind
+variable annotation from the class declaration. It keeps its polymorphic kind
+in the associated type declaration. The variable <literal>b</literal>, however,
+gets defaulted to <literal>*</literal>.
 </para></listitem>
 </itemizedlist>
 In a complete user-specified kind signature, any un-decorated type variable to the
 left of the "<literal>::</literal>" is considered to have kind "<literal>*</literal>".
 If you want kind polymorphism, specify a kind variable.
+</para>
+
+</sect2>
+
+<sect2><title>Kind inference in closed type families</title>
+
+<para>Although all open type families are considered to have a complete
+user-specified kind signature, we can relax this condition for closed type
+families, where we have equations on which to perform kind inference. GHC will
+infer a kind for any type variable in a closed type family when that kind is
+never used in pattern-matching. If you want a kind variable to be used in
+pattern-matching, you must declare it explicitly.
+</para>
+
+<para>
+Here are some examples (assuming <literal>-XDataKinds</literal> is enabled):
+<programlisting>
+type family Not a where      -- Not :: Bool -> Bool
+  Not False = True
+  Not True  = False
+
+type family F a where        -- ERROR: requires pattern-matching on a kind variable
+  F Int   = Bool
+  F Maybe = Char
+
+type family G (a :: k) where -- G :: k -> *
+  G Int   = Bool
+  G Maybe = Char
+
+type family SafeHead where   -- SafeHead :: [k] -> Maybe k
+  SafeHead '[] = Nothing     -- note that k is not required for pattern-matching
+  SafeHead (h ': t) = Just h
+</programlisting>
 </para>
 
 </sect2>

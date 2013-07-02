@@ -86,7 +86,7 @@ module TcSMonad (
 
     getDefaultInfo, getDynFlags,
 
-    matchClass, matchFam, MatchInstResult (..), 
+    matchFam, matchOpenFam, 
     checkWellStagedDFun, 
     pprEq                                    -- Smaller utils, re-exported from TcM
                                              -- TODO (DV): these are only really used in the 
@@ -132,6 +132,7 @@ import TcRnTypes
 import Unique 
 import UniqFM
 import Maybes ( orElse, catMaybes, firstJust )
+import Pair ( pSnd )
 
 import Control.Monad( unless, when, zipWithM )
 import Data.IORef
@@ -1634,48 +1635,30 @@ rewriteCtFlavor (CtWanted { ctev_evar = evar, ctev_pred = old_pred }) new_pred c
 
 
 
--- Matching and looking up classes and family instances
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+matchOpenFam :: TyCon -> [Type] -> TcS (Maybe FamInstMatch)
+matchOpenFam tycon args = wrapTcS $ tcLookupFamInst tycon args
 
-data MatchInstResult mi
-  = MatchInstNo         -- No matching instance 
-  | MatchInstSingle mi  -- Single matching instance
-  | MatchInstMany       -- Multiple matching instances
+matchFam :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType))
+matchFam tycon args
+  | isOpenSynFamilyTyCon tycon
+  = do { maybe_match <- matchOpenFam tycon args
+       ; case maybe_match of
+           Nothing -> return Nothing
+           Just (FamInstMatch { fim_instance = famInst
+                              , fim_tys      = inst_tys })
+             -> let co = mkTcUnbranchedAxInstCo (famInstAxiom famInst) inst_tys
+                    ty = pSnd $ tcCoercionKind co
+                in return $ Just (co, ty) }
 
+  | Just ax <- isClosedSynFamilyTyCon_maybe tycon
+  , Just (ind, inst_tys) <- chooseBranch ax args
+  = let co = mkTcAxInstCo ax ind inst_tys
+        ty = pSnd (tcCoercionKind co)
+    in return $ Just (co, ty)
 
-matchClass :: Class -> [Type] -> TcS (MatchInstResult (DFunId, [Maybe TcType])) 
--- Look up a class constraint in the instance environment
-matchClass clas tys
-  = do	{ let pred = mkClassPred clas tys 
-        ; instEnvs <- getInstEnvs
-        ; case lookupInstEnv instEnvs clas tys of {
-            ([], _unifs, _)               -- Nothing matches  
-                -> do { traceTcS "matchClass not matching" $ 
-                        vcat [ text "dict" <+> ppr pred
-                             {- , ppr instEnvs -} ]
-                        
-                      ; return MatchInstNo  
-                      } ;  
-	    ([(ispec, inst_tys)], [], _) -- A single match 
-		-> do	{ let dfun_id = is_dfun ispec
-			; traceTcS "matchClass success" $
-                          vcat [text "dict" <+> ppr pred, 
-                                text "witness" <+> ppr dfun_id
-                                               <+> ppr (idType dfun_id) ]
-				  -- Record that this dfun is needed
-                        ; return $ MatchInstSingle (dfun_id, inst_tys)
-                        } ;
-     	    (matches, _unifs, _)          -- More than one matches 
-		-> do	{ traceTcS "matchClass multiple matches, deferring choice" $
-                          vcat [text "dict" <+> ppr pred,
-                                text "matches" <+> ppr matches]
-                        ; return MatchInstMany 
-		        }
-	}
-        }
-
-matchFam :: TyCon -> [Type] -> TcS (Maybe FamInstMatch)
-matchFam tycon args = wrapTcS $ tcLookupFamInst tycon args
+  | otherwise
+  = return Nothing
+       
 \end{code}
 
 \begin{code}

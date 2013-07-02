@@ -20,12 +20,12 @@ import VarSet
 import Type
 import Unify
 import FamInstEnv
-import Coercion( mkAxInstRHS )
+import InstEnv( lookupInstEnv, instanceDFunId )
 
 import Var
 import TcType
 import PrelNames (singIClassName, ipClassNameKey )
-
+import Id( idType )
 import Class
 import TyCon
 import Name
@@ -1416,7 +1416,7 @@ doTopReactDict inerts fl cls xis loc
 doTopReactFunEq :: Ct -> CtEvidence -> TyCon -> [Xi] -> Xi
                 -> CtLoc -> TcS TopInteractResult
 doTopReactFunEq _ct fl fun_tc args xi loc
-  = ASSERT (isSynFamilyTyCon fun_tc) -- No associated data families have 
+  = ASSERT(isSynFamilyTyCon fun_tc) -- No associated data families have
                                      -- reached this far 
     -- Look in the cache of solved funeqs
     do { fun_eq_cache <- getTcSInerts >>= (return . inert_solved_funeqs)
@@ -1431,17 +1431,13 @@ doTopReactFunEq _ct fl fun_tc args xi loc
     do { match_res <- matchFam fun_tc args   -- See Note [MATCHING-SYNONYMS]
        ; case match_res of {
            Nothing -> return NoTopInt ;
-           Just (FamInstMatch { fim_instance = famInst
-                              , fim_index    = index
-                              , fim_tys      = rep_tys }) -> 
+           Just (co, ty) ->
 
     -- Found a top-level instance
     do {    -- Add it to the solved goals
          unless (isDerived fl) (addSolvedFunEq fam_ty fl xi)
 
-       ; let coe_ax = famInstAxiom famInst 
-       ; succeed_with "Fun/Top" (mkTcAxInstCo coe_ax index rep_tys)
-                      (mkAxInstRHS coe_ax index rep_tys) } } } } }
+       ; succeed_with "Fun/Top" co ty } } } } }
   where
     fam_ty = mkTyConApp fun_tc args
 
@@ -1709,17 +1705,17 @@ matchClassInst _ clas [ k, ty ] _
     case unwrapNewTyCon_maybe (classTyCon clas) of
       Just (_,dictRep, axDict)
         | Just tcSing <- tyConAppTyCon_maybe dictRep ->
-           do mbInst <- matchFam tcSing [k,ty]
+           do mbInst <- matchOpenFam tcSing [k,ty]
               case mbInst of
                 Just FamInstMatch
                   { fim_instance = FamInst { fi_axiom  = axDataFam
                                            , fi_flavor = DataFamilyInst tcon
                                            }
-                  , fim_index = ix, fim_tys = tys
+                  , fim_tys = tys
                   } | Just (_,_,axSing) <- unwrapNewTyCon_maybe tcon ->
 
                   do let co1 = mkTcSymCo $ mkTcUnbranchedAxInstCo axSing tys
-                         co2 = mkTcSymCo $ mkTcAxInstCo axDataFam ix tys
+                         co2 = mkTcSymCo $ mkTcUnbranchedAxInstCo axDataFam tys
                          co3 = mkTcSymCo $ mkTcUnbranchedAxInstCo axDict [k,ty]
                      return $ GenInst [] $ EvCast (EvLit evLit) $
                         mkTcTransCo co1 $ mkTcTransCo co2 co3
@@ -1732,44 +1728,60 @@ matchClassInst _ clas [ k, ty ] _
 
 matchClassInst inerts clas tys loc
    = do { dflags <- getDynFlags
-        ; let pred = mkClassPred clas tys 
-              incoherent_ok = xopt Opt_IncoherentInstances  dflags
-        ; mb_result <- matchClass clas tys
         ; untch <- getUntouchables
         ; traceTcS "matchClassInst" $ vcat [ text "pred =" <+> ppr pred
                                            , text "inerts=" <+> ppr inerts
                                            , text "untouchables=" <+> ppr untch ]
-        ; case mb_result of
-            MatchInstNo   -> return NoInstance
-            MatchInstMany -> return NoInstance -- defer any reactions of a multitude until
-                                               -- we learn more about the reagent 
-            MatchInstSingle (_,_)
-              | not incoherent_ok && given_overlap untch 
-              -> -- see Note [Instance and Given overlap]
-                 do { traceTcS "Delaying instance application" $ 
-                       vcat [ text "Workitem=" <+> pprType (mkClassPred clas tys)
-                            , text "Relevant given dictionaries=" <+> ppr givens_for_this_clas ]
-                     ; return NoInstance
-                     }
+        ; instEnvs <- getInstEnvs
+        ; case lookupInstEnv instEnvs clas tys of
+            ([], _, _)               -- Nothing matches  
+                -> do { traceTcS "matchClass not matching" $ 
+                        vcat [ text "dict" <+> ppr pred ]
+                      ; return NoInstance }
 
-            MatchInstSingle (dfun_id, mb_inst_tys) ->
-              do { checkWellStagedDFun pred dfun_id loc
+	    ([(ispec, inst_tys)], [], _) -- A single match 
+                | not (xopt Opt_IncoherentInstances dflags)
+                , given_overlap untch 
+                -> -- See Note [Instance and Given overlap]
+                   do { traceTcS "Delaying instance application" $ 
+                          vcat [ text "Workitem=" <+> pprType (mkClassPred clas tys)
+                               , text "Relevant given dictionaries=" <+> ppr givens_for_this_clas ]
+                      ; return NoInstance  }
 
-                       -- mb_inst_tys :: Maybe TcType 
-                       -- See Note [DFunInstType: instantiating types] in InstEnv
+                | otherwise
+		-> do	{ let dfun_id = instanceDFunId ispec
+			; traceTcS "matchClass success" $
+                          vcat [text "dict" <+> ppr pred, 
+                                text "witness" <+> ppr dfun_id
+                                               <+> ppr (idType dfun_id) ]
+				  -- Record that this dfun is needed
+                        ; match_one dfun_id inst_tys }
 
-                 ; (tys, dfun_phi) <- instDFunType dfun_id mb_inst_tys
-                 ; let (theta, _) = tcSplitPhiTy dfun_phi
-                 ; if null theta then
-                       return (GenInst [] (EvDFunApp dfun_id tys []))
-                   else do
-                     { evc_vars <- instDFunConstraints theta
-                     ; let new_ev_vars = freshGoals evc_vars
-                           -- new_ev_vars are only the real new variables that can be emitted 
-                           dfun_app = EvDFunApp dfun_id tys (getEvTerms evc_vars)
-                     ; return $ GenInst new_ev_vars dfun_app } }
-        }
+     	    (matches, _, _)    -- More than one matches 
+                               -- Defer any reactions of a multitude
+                               -- until we learn more about the reagent 
+		-> do	{ traceTcS "matchClass multiple matches, deferring choice" $
+                          vcat [text "dict" <+> ppr pred,
+                                text "matches" <+> ppr matches]
+                        ; return NoInstance } }
    where 
+     pred = mkClassPred clas tys 
+
+     match_one :: DFunId -> [Maybe TcType] -> TcS LookupInstResult
+                  -- See Note [DFunInstType: instantiating types] in InstEnv
+     match_one dfun_id mb_inst_tys
+       = do { checkWellStagedDFun pred dfun_id loc
+            ; (tys, dfun_phi) <- instDFunType dfun_id mb_inst_tys
+            ; let (theta, _) = tcSplitPhiTy dfun_phi
+            ; if null theta then
+                  return (GenInst [] (EvDFunApp dfun_id tys []))
+              else do
+            { evc_vars <- instDFunConstraints theta
+            ; let new_ev_vars = freshGoals evc_vars
+                      -- new_ev_vars are only the real new variables that can be emitted 
+                  dfun_app = EvDFunApp dfun_id tys (getEvTerms evc_vars)
+            ; return $ GenInst new_ev_vars dfun_app } }
+
      givens_for_this_clas :: Cts
      givens_for_this_clas 
          = lookupUFM (cts_given (inert_dicts $ inert_cans inerts)) clas 

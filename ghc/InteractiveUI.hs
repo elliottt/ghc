@@ -1047,7 +1047,7 @@ filterOutChildren get_thing xs
                      Nothing -> False
 
 pprInfo :: PrintExplicitForalls
-        -> (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst GHC.Branched]) -> SDoc
+        -> (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
 pprInfo pefas (thing, fixity, cls_insts, fam_insts)
   =  pprTyThingInContextLoc pefas thing
   $$ show_fixity
@@ -2215,7 +2215,7 @@ showBindings = do
         return $ maybe (text "") (pprTT pefas) mb_stuff
 
     pprTT :: PrintExplicitForalls
-          -> (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst GHC.Branched]) -> SDoc
+          -> (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
     pprTT pefas (thing, fixity, _cls_insts, _fam_insts) =
         pprTyThing pefas thing
         $$ show_fixity
@@ -2466,7 +2466,7 @@ enclosingTickSpan _ (UnhelpfulSpan _) = panic "enclosingTickSpan UnhelpfulSpan"
 enclosingTickSpan md (RealSrcSpan src) = do
   ticks <- getTickArray md
   let line = srcSpanStartLine src
-  ASSERT (inRange (bounds ticks) line) do
+  ASSERT(inRange (bounds ticks) line) do
   let toRealSrcSpan (UnhelpfulSpan _) = panic "enclosingTickSpan UnhelpfulSpan"
       toRealSrcSpan (RealSrcSpan s) = s
       enclosing_spans = [ pan | (_,pan) <- ticks ! line
