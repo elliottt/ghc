@@ -404,7 +404,7 @@ getInitialKind decl@(DataDecl { tcdLName = L _ name
                          | L _ con <- cons ]
        ; return (main_pr : inner_prs) }
 
-getInitialKind _top_lvl KindDecl {}
+getInitialKind KindDecl {}
   = failWithTc (ptext (sLit "`data kind` declarations can only be recursive")
             <+> ptext (sLit "with other `data kind` declarations"))
 

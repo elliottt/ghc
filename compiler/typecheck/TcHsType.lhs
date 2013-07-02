@@ -1092,6 +1092,8 @@ kcStrategy (DataDecl { tcdDataDefn = HsDataDefn { dd_kindSig = m_ksig }})
   | Just _ <- m_ksig            = FullKindSignature
   | otherwise                   = ParametricKinds
 kcStrategy (ClassDecl {})     = ParametricKinds
+-- TODO: not sure if this is the right choice for 'data kind' decls
+kcStrategy (KindDecl {})      = ParametricKinds
 
 kcStrategyFamDecl :: FamilyDecl Name -> KindCheckingStrategy
 kcStrategyFamDecl (FamilyDecl { fdInfo = info })
