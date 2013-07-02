@@ -2284,10 +2284,10 @@ to be written infix, very much like expressions.  More specifically:
   </para></listitem>
 <listitem><para>
   Types, and class constraints, can be written infix.  For example
-  <screen>
-	x :: Int :*: Bool
-        f :: (a :=: b) => a -> b
-  </screen>
+<screen>
+  x :: Int :*: Bool
+  f :: (a :=: b) => a -> b
+</screen>
   </para></listitem>
 <listitem><para>
   Back-quotes work
@@ -2309,6 +2309,56 @@ to be written infix, very much like expressions.  More specifically:
   Function arrow is <literal>infixr</literal> with fixity 0.  (This might change; I'm not sure what it should be.)
   </para></listitem>
 
+</itemizedlist>
+</para>
+</sect2>
+
+<sect2 id="type-operators">
+<title>Type operators</title>
+<para>
+In types, an operator symbol like <literal>(+)</literal> is normally treated as a type
+<emphasis>variable</emphasis>, just like <literal>a</literal>.  Thus in Haskell 98 you can say
+<programlisting>
+type T (+) = ((+), (+))
+-- Just like: type T a = (a,a)
+
+f :: T Int -> Int
+f (x,y)= x
+</programlisting>
+As you can see, using operators in this way is not very useful, and Haskell 98 does not even
+allow you to write them infix.
+</para>
+<para>
+The language <option>-XTypeOperators</option> changes this behaviour:
+<itemizedlist>
+<listitem><para>
+Operator symbols become type <emphasis>constructors</emphasis> rather than 
+type <emphasis>variables</emphasis>.
+</para></listitem>
+<listitem><para>
+Operator symbols in types can be written infix, both in definitions and uses. 
+for example:
+<programlisting>
+data a + b = Plus a b
+type Foo = Int + Bool
+</programlisting>
+</para></listitem>
+<listitem><para>
+There is now some potential ambiguity in import and export lists; for example
+if you write <literal>import M( (+) )</literal> do you mean the 
+<emphasis>function</emphasis> <literal>(+)</literal> or the 
+<emphasis>type constructor</emphasis> <literal>(+)</literal>?
+The default is the former, but GHC allows you to specify the latter
+by preceding it with the keyword <literal>type</literal>, thus:
+<programlisting>
+import M( type (+) )
+</programlisting>
+</para></listitem>
+<listitem><para>
+The fixity of a type operator may be set using the usual fixity declarations
+but, as in <xref linkend="infix-tycons"/>, the function and type constructor share
+a single fixity.
+</para></listitem>
 </itemizedlist>
 </para>
 </sect2>
@@ -5763,7 +5813,7 @@ very convenient, and it is not clear what the syntax for explicit quantification
 </para>
 </sect2>
 
-<sect2> <title>Polymorphic kind recursion and complete kind signatures</title>
+<sect2 id="complete-kind-signatures"> <title>Polymorphic kind recursion and complete kind signatures</title>
 
 <para>
 Just as in type inference, kind inference for recursive types can only use <emphasis>monomorphic</emphasis> recursion.
@@ -5808,19 +5858,59 @@ you must use GADT syntax.
 </para></listitem>
 
 <listitem><para>
-A type or data family declaration <emphasis>always</emphasis> have a
+An open type or data family declaration <emphasis>always</emphasis> has a
 complete user-specified kind signature; no "<literal>::</literal>" is required:
 <programlisting>
 data family D1 a           	-- D1 :: * -> *
 data family D2 (a :: k)    	-- D2 :: forall k. k -> *
 data family D3 (a :: k) :: *    -- D3 :: forall k. k -> *
 type family S1 a :: k -> *      -- S1 :: forall k. * -> k -> *
+
+class C a where                 -- C  :: k -> Constraint
+  type AT a b                   -- AT :: k -> * -> *
 </programlisting>
+In the last example, the variable <literal>a</literal> has an implicit kind
+variable annotation from the class declaration. It keeps its polymorphic kind
+in the associated type declaration. The variable <literal>b</literal>, however,
+gets defaulted to <literal>*</literal>.
 </para></listitem>
 </itemizedlist>
 In a complete user-specified kind signature, any un-decorated type variable to the
 left of the "<literal>::</literal>" is considered to have kind "<literal>*</literal>".
 If you want kind polymorphism, specify a kind variable.
+</para>
+
+</sect2>
+
+<sect2><title>Kind inference in closed type families</title>
+
+<para>Although all open type families are considered to have a complete
+user-specified kind signature, we can relax this condition for closed type
+families, where we have equations on which to perform kind inference. GHC will
+infer a kind for any type variable in a closed type family when that kind is
+never used in pattern-matching. If you want a kind variable to be used in
+pattern-matching, you must declare it explicitly.
+</para>
+
+<para>
+Here are some examples (assuming <literal>-XDataKinds</literal> is enabled):
+<programlisting>
+type family Not a where      -- Not :: Bool -> Bool
+  Not False = True
+  Not True  = False
+
+type family F a where        -- ERROR: requires pattern-matching on a kind variable
+  F Int   = Bool
+  F Maybe = Char
+
+type family G (a :: k) where -- G :: k -> *
+  G Int   = Bool
+  G Maybe = Char
+
+type family SafeHead where   -- SafeHead :: [k] -> Maybe k
+  SafeHead '[] = Nothing     -- note that k is not required for pattern-matching
+  SafeHead (h ': t) = Just h
+</programlisting>
 </para>
 
 </sect2>

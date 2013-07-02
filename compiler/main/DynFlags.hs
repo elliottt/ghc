@@ -79,6 +79,7 @@ module DynFlags (
         defaultFatalMessager,
         defaultLogAction,
         defaultLogActionHPrintDoc,
+        defaultLogActionHPutStrDoc,
         defaultFlushOut,
         defaultFlushErr,
 
@@ -1382,22 +1383,31 @@ defaultFatalMessager = hPutStrLn stderr
 defaultLogAction :: LogAction
 defaultLogAction dflags severity srcSpan style msg
     = case severity of
-      SevOutput -> printSDoc msg style
-      SevDump   -> printSDoc (msg $$ blankLine) style
-      SevInfo   -> printErrs msg style
-      SevFatal  -> printErrs msg style
-      _         -> do hPutChar stderr '\n'
-                      printErrs (mkLocMessage severity srcSpan msg) style
-                      -- careful (#2302): printErrs prints in UTF-8, whereas
-                      -- converting to string first and using hPutStr would
-                      -- just emit the low 8 bits of each unicode char.
-    where printSDoc = defaultLogActionHPrintDoc dflags stdout
-          printErrs = defaultLogActionHPrintDoc dflags stderr
+      SevOutput      -> printSDoc msg style
+      SevDump        -> printSDoc (msg $$ blankLine) style
+      SevInteractive -> putStrSDoc msg style
+      SevInfo        -> printErrs msg style
+      SevFatal       -> printErrs msg style
+      _              -> do hPutChar stderr '\n'
+                           printErrs (mkLocMessage severity srcSpan msg) style
+                           -- careful (#2302): printErrs prints in UTF-8,
+                           -- whereas converting to string first and using
+                           -- hPutStr would just emit the low 8 bits of
+                           -- each unicode char.
+    where printSDoc  = defaultLogActionHPrintDoc  dflags stdout
+          printErrs  = defaultLogActionHPrintDoc  dflags stderr
+          putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
 
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPrintDoc dflags h d sty
     = do let doc = runSDoc d (initSDocContext dflags sty)
          Pretty.printDoc Pretty.PageMode (pprCols dflags) h doc
+         hFlush h
+
+defaultLogActionHPutStrDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
+defaultLogActionHPutStrDoc dflags h d sty
+    = do let doc = runSDoc d (initSDocContext dflags sty)
+         hPutStr h (Pretty.render doc)
          hFlush h
 
 newtype FlushOut = FlushOut (IO ())

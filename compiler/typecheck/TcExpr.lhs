@@ -58,6 +58,9 @@ import Outputable
 import FastString
 import Control.Monad
 import Class(classTyCon)
+import Data.Function
+import Data.List
+import qualified Data.Set as Set
 \end{code}
 
 %************************************************************************
@@ -660,7 +663,7 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
         -- Step 2
         -- Check that at least one constructor has all the named fields
         -- i.e. has an empty set of bad fields returned by badFields
-        ; checkTc (not (null relevant_cons)) (badFieldsUpd rbinds)
+        ; checkTc (not (null relevant_cons)) (badFieldsUpd rbinds data_cons)
 
         -- STEP 3    Note [Criteria for update]
         -- Check that each updated field is polymorphic; that is, its type
@@ -1509,11 +1512,81 @@ badFieldTypes prs
                          <> plural prs <> colon)
        2 (vcat [ ppr f <+> dcolon <+> ppr ty | (f,ty) <- prs ])
 
-badFieldsUpd :: HsRecFields Name a -> SDoc
-badFieldsUpd rbinds
+badFieldsUpd
+  :: HsRecFields Name a -- Field names that don't belong to a single datacon
+  -> [DataCon] -- Data cons of the type which the first field name belongs to
+  -> SDoc
+badFieldsUpd rbinds data_cons
   = hang (ptext (sLit "No constructor has all these fields:"))
-       2 (pprQuotedList (hsRecFields rbinds))
+       2 (pprQuotedList conflictingFields)
+          -- See Note [Finding the conflicting fields]
+  where
+    -- A (preferably small) set of fields such that no constructor contains
+    -- all of them.  See Note [Finding the conflicting fields]
+    conflictingFields = case nonMembers of
+        -- nonMember belongs to a different type.
+        (nonMember, _) : _ -> [aMember, nonMember]
+        [] -> let
+            -- All of rbinds belong to one type. In this case, repeatedly add
+            -- a field to the set until no constructor contains the set.
 
+            -- Each field, together with a list indicating which constructors
+            -- have all the fields so far.
+            growingSets :: [(Name, [Bool])]
+            growingSets = scanl1 combine membership
+            combine (_, setMem) (field, fldMem)
+              = (field, zipWith (&&) setMem fldMem)
+            in
+            -- Fields that don't change the membership status of the set
+            -- are redundant and can be dropped.
+            map (fst . head) $ groupBy ((==) `on` snd) growingSets
+
+    aMember = ASSERT( not (null members) ) fst (head members)
+    (members, nonMembers) = partition (or . snd) membership
+
+    -- For each field, which constructors contain the field?
+    membership :: [(Name, [Bool])]
+    membership = sortMembership $
+        map (\fld -> (fld, map (Set.member fld) fieldLabelSets)) $
+          hsRecFields rbinds
+
+    fieldLabelSets :: [Set.Set Name]
+    fieldLabelSets = map (Set.fromList . dataConFieldLabels) data_cons
+
+    -- Sort in order of increasing number of True, so that a smaller
+    -- conflicting set can be found.
+    sortMembership =
+      map snd .
+      sortBy (compare `on` fst) .
+      map (\ item@(_, membershipRow) -> (countTrue membershipRow, item))
+
+    countTrue = length . filter id
+\end{code}
+
+Note [Finding the conflicting fields]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+  data A = A {a0, a1 :: Int}
+         | B {b0, b1 :: Int}
+and we see a record update
+  x { a0 = 3, a1 = 2, b0 = 4, b1 = 5 }
+Then we'd like to find the smallest subset of fields that no
+constructor has all of.  Here, say, {a0,b0}, or {a0,b1}, etc.
+We don't really want to report that no constructor has all of
+{a0,a1,b0,b1}, because when there are hundreds of fields it's 
+hard to see what was really wrong.
+
+We may need more than two fields, though; eg
+  data T = A { x,y :: Int, v::Int } 
+          | B { y,z :: Int, v::Int } 
+          | C { z,x :: Int, v::Int }
+with update
+   r { x=e1, y=e2, z=e3 }, we
+
+Finding the smallest subset is hard, so the code here makes
+a decent stab, no more.  See Trac #7989. 
+
+\begin{code}
 naughtyRecordSel :: TcId -> SDoc
 naughtyRecordSel sel_id
   = ptext (sLit "Cannot use record selector") <+> quotes (ppr sel_id) <+>
