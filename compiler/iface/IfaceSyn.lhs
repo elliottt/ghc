@@ -173,6 +173,14 @@ instance Binary IfaceDecl where
         put_ bh a2
         put_ bh a3
 
+    put_ bh (IfaceDataKind a1 a2 a3 a4) = do
+        putByte bh 6
+        put_ bh (occNameFS a1)
+        put_ bh a2
+        put_ bh a3
+        put_ bh a4
+
+
     get bh = do
         h <- getByte bh
         case h of
@@ -209,11 +217,31 @@ instance Binary IfaceDecl where
                     a7 <- get bh
                     occ <- return $! mkOccNameFS clsName a2
                     return (IfaceClass a1 occ a3 a4 a5 a6 a7)
-            _ -> do a1 <- get bh
+            5 -> do a1 <- get bh
                     a2 <- get bh
                     a3 <- get bh
                     occ <- return $! mkOccNameFS tcName a1
                     return (IfaceAxiom occ a2 a3)
+            6 -> do a1 <- get bh
+                    a2 <- get bh
+                    a3 <- get bh
+                    a4 <- get bh
+                    occ <- return $! mkOccNameFS tcName a1
+                    return (IfaceDataKind occ a2 a3 a4)
+            _ -> error ("Binary.get(TyClDecl): Unknown tag " ++ show h)
+
+instance Binary (PromotionInfo ()) where
+  put_ bh p = case p of
+    NeverPromote  -> putByte bh 0x0
+    NotPromotable -> putByte bh 0x1
+    Promotable () -> putByte bh 0x2
+  get bh = do
+    tag <- getByte bh
+    case tag of
+      0x0 -> return NeverPromote
+      0x1 -> return NotPromotable
+      0x2 -> return (Promotable ())
+      _   -> error ("Binary.get(Promotable ()): Unknown tag " ++ show tag)
 
 data IfaceSynTyConRhs
   = IfaceOpenSynFamilyTyCon
@@ -374,12 +402,6 @@ instance Binary IfaceConDecl where
 data IfaceBang
   = IfNoBang | IfStrict | IfUnpack | IfUnpackCo IfaceCoercion
 
-data IfaceTyConDecl
-  = IfTyCon {
-        ifTyConOcc   :: OccName,    -- constructor name
-        ifTyConArgKs :: [IfaceKind] -- constructor argument kinds
-    }
-
 instance Binary IfaceBang where
     put_ bh IfNoBang        = putByte bh 0
     put_ bh IfStrict        = putByte bh 1
@@ -393,6 +415,22 @@ instance Binary IfaceBang where
               1 -> do return IfStrict
               2 -> do return IfUnpack
               _ -> do { a <- get bh; return (IfUnpackCo a) }
+
+data IfaceTyConDecl
+  = IfTyCon {
+        ifTyConOcc   :: OccName,    -- constructor name
+        ifTyConArgKs :: [IfaceKind] -- constructor argument kinds
+    }
+
+instance Binary IfaceTyConDecl where
+  put_ bh (IfTyCon a1 a2) = do
+    put_ bh (occNameFS a1)
+    put_ bh a2
+  get bh = do
+    a1 <- get bh
+    a2 <- get bh
+    occ <- return $! mkOccNameFS tcName a1
+    return (IfTyCon occ a2)
 
 data IfaceClsInst
   = IfaceClsInst { ifInstCls  :: IfExtName,                -- See comments with
