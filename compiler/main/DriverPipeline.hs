@@ -826,7 +826,7 @@ runPhase (RealPhase (Unlit sf)) input_fn dflags
                      SysTools.Option     "-h"
                    , SysTools.Option $ escape $ normalise input_fn
                    ] ++
-                   [ SysTools.Option flag | flag <- ["-r", "-#"]
+                   [ SysTools.Option flag | flag <- ["-m"]
                                           , ext `elem` [".md", ".markdown"]
                    ] ++
                    [ SysTools.FileOption "" input_fn

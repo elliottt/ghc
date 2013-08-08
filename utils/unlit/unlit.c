@@ -84,6 +84,7 @@ static int crunchnl = 0; /* don't print \n for removed lines                 */
 static int leavecpp = 1; /* leave preprocessor lines */
 static int ignore_shebang = 1; /* Leave out shebang (#!) lines */
 static int no_line_pragma = 0; /* Leave out initial line pragma */
+static int markdown       = 0; /* Process input as markdown */
 
 static char* prefix_str = NULL; /* Prefix output with a string */
 
@@ -233,10 +234,6 @@ line readline(FILE *istream, FILE *ostream) {
     else if (strcmp(buf, BEGINPSEUDOCODE) == 0)
 	return PSEUDO;
 #endif
-    else if (strncmp(buf, FENCE, LENFENCE) == 0)
-        return BEGIN;
-    else if (strncmp(buf, HFENCE, LENHFENCE) == 0)
-        return BEGIN;
     else
 	return TEXT;
 }
@@ -279,10 +276,7 @@ void unlit(char *file, FILE *istream, FILE *ostream)
 		if (strncmp(lineb,ENDCODE,LENENDCODE) == 0) {
 		    myputc('\n', ostream);
 		    break;
-		} else if(strncmp(lineb,FENCE,LENFENCE) == 0) {
-                    myputc('\n', ostream);
-                    break;
-                }
+		}
 		fputs(lineb, ostream);
 	    }
 	    defnsread++;
@@ -309,6 +303,101 @@ void unlit(char *file, FILE *istream, FILE *ostream)
         complain(file,linesread,EMPTYSCRIPT);
 }
 
+/* readline_markdown(istream,ostream)
+ *
+ * A version of readline that's specialized to markdown input.  This means that
+ * it explicitly ignores birdtracks, and assumes that there is no CPP in the
+ * input file.  Additionally, the four-space indented code block is not
+ * supported.
+ */
+line readline_markdown(FILE *istream, FILE *ostream)
+{
+    int c, c1;
+    char buf[100];
+    int i;
+
+    c = egetc(istream);
+
+    if (c==EOF)
+        return END;
+
+    if (!crunchnl)
+        myputc('\n',ostream);
+
+    while (isWhitespace(c))
+        c=egetc(istream);
+    if (isLineTerm(c))
+        return BLANK;
+
+    i = 0;
+    buf[i++] = c;
+    while (c=egetc(istream), !isLineTerm(c))
+        if (i < sizeof buf - 1)
+            buf[i++] = c;
+
+    while(i > 0 && isspace(buf[i-1]))
+        i--;
+
+    buf[i] = 0;
+
+    if (strncmp(buf, FENCE, LENFENCE) == 0)
+        return BEGIN;
+    else if (strncmp(buf, HFENCE, LENHFENCE) == 0)
+        return BEGIN;
+    else
+        return TEXT;
+}
+
+/* unlit_markdown(file,istream,ostream)
+ */
+void unlit_markdown(char *file, FILE *istream, FILE *ostream)
+{
+    line this=START;
+    int  linesread=0;
+    int  defnsread=0;
+
+    do {
+        this = readline_markdown(istream, ostream);
+        linesread++;
+
+        if (this == BEGIN) {
+            /* start of code, copy to end */
+            char lineb[1000];
+            char *cursor = NULL;
+
+            for(;;) {
+                cursor = lineb;
+                if (fgets(lineb, sizeof lineb, istream) == NULL) {
+                    complain(file, linesread, MISSINGENDCODE);
+                    exit(1);
+                }
+                linesread++;
+
+                /* check for an ending block that's optionally surrounded by
+                 * spaces */
+
+                for(; isspace(*cursor); ++cursor) {}
+
+                if (strncmp(cursor,FENCE,LENFENCE) == '\0') {
+                    cursor += 3;
+
+                    for(; isspace(*cursor); ++cursor) {}
+
+                    if(*cursor == 0) {
+                        break;
+                    }
+                }
+
+                fputs(lineb, ostream);
+            }
+            defnsread++;
+        }
+    } while(this!=END);
+
+    if (defnsread==0)
+        complain(file,linesread,EMPTYSCRIPT);
+}
+
 /* main(argc, argv)
  *
  * Main program.  Processes command line arguments, looking for leading:
@@ -316,6 +405,7 @@ void unlit(char *file, FILE *istream, FILE *ostream)
  *  -n  noisy mode - complain about bad literate script files.
  *  -r  remove cpp droppings in output.
  *  -P  don't output any CPP line pragmas.
+ *  -m  markdown mode, implies -P and -r
  * Expects two additional arguments, a file name for the input and a file
  * name for the output file.  These two names must normally be distinct.
  * An exception is made for the special name "-" which can be used in either
@@ -338,6 +428,8 @@ int main(int argc,char **argv)
 	    crunchnl = 1;
         else if (strcmp(*argv,"-P")==0)
 	    no_line_pragma = 1;
+        else if (strcmp(*argv,"-m")==0)
+            markdown = 1;
         else if (strcmp(*argv,"-h")==0) {
 	  if (argc > 1) {
 	    argc--; argv++;
@@ -394,7 +486,11 @@ int main(int argc,char **argv)
       fprintf(ostream, "#line 1 \"%s\"\n", prefix_str);
     }
 
-    unlit(file, istream, ostream);
+    if(markdown) {
+        unlit_markdown(file, istream, ostream);
+    } else {
+        unlit(file, istream, ostream);
+    }
 
     if (istream != stdin) fclose(istream);
     if (ostream != stdout) {
