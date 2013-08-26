@@ -107,15 +107,6 @@ cgOpApp (StgPrimOp primop) args res_ty
        cgPrimOp regs primop args
        emitReturn (map (CmmReg . CmmLocal) regs)
 
-  | ReturnsAlg tycon <- result_info
-  , isEnumerationTyCon tycon
-        -- c.f. cgExpr (...TagToEnumOp...)
-  = do dflags <- getDynFlags
-       tag_reg <- newTemp (bWord dflags)
-       cgPrimOp [tag_reg] primop args
-       emitReturn [tagToClosure dflags tycon
-                                (CmmReg (CmmLocal tag_reg))]
-
   | otherwise = panic "cgPrimop"
   where
      result_info = getPrimOpResultInfo primop
@@ -1047,7 +1038,7 @@ doIndexOffAddrOp _ _ _ _
 
 doIndexOffAddrOpAs :: Maybe MachOp
                    -> CmmType
-                   -> CmmType 
+                   -> CmmType
                    -> [LocalReg]
                    -> [CmmExpr]
                    -> FCode ()
@@ -1064,19 +1055,19 @@ doIndexByteArrayOp :: Maybe MachOp
 doIndexByteArrayOp maybe_post_read_cast rep [res] [addr,idx]
    = do dflags <- getDynFlags
         mkBasicIndexedRead (arrWordsHdrSize dflags) maybe_post_read_cast rep res addr rep idx
-doIndexByteArrayOp _ _ _ _ 
+doIndexByteArrayOp _ _ _ _
    = panic "StgCmmPrim: doIndexByteArrayOp"
 
 doIndexByteArrayOpAs :: Maybe MachOp
                     -> CmmType
-                    -> CmmType 
+                    -> CmmType
                     -> [LocalReg]
                     -> [CmmExpr]
                     -> FCode ()
 doIndexByteArrayOpAs maybe_post_read_cast rep idx_rep [res] [addr,idx]
    = do dflags <- getDynFlags
         mkBasicIndexedRead (arrWordsHdrSize dflags) maybe_post_read_cast rep res addr idx_rep idx
-doIndexByteArrayOpAs _ _ _ _ _ 
+doIndexByteArrayOpAs _ _ _ _ _
    = panic "StgCmmPrim: doIndexByteArrayOpAs"
 
 doReadPtrArrayOp :: LocalReg
@@ -1221,7 +1212,7 @@ doVecPackOp maybe_pre_write_cast ty z es res = do
                  Just cast -> CmmMachOp cast [val]
 
     len :: Length
-    len = vecLength ty 
+    len = vecLength ty
 
     wid :: Width
     wid = typeWidth (vecElemType ty)
@@ -1255,7 +1246,7 @@ doVecUnpackOp maybe_post_read_cast ty e res =
                  Just cast -> CmmMachOp cast [val]
 
     len :: Length
-    len = vecLength ty 
+    len = vecLength ty
 
     wid :: Width
     wid = typeWidth (vecElemType ty)
@@ -1282,7 +1273,7 @@ doVecInsertOp maybe_pre_write_cast ty src e idx res = do
                  Just cast -> CmmMachOp cast [val]
 
     len :: Length
-    len = vecLength ty 
+    len = vecLength ty
 
     wid :: Width
     wid = typeWidth (vecElemType ty)

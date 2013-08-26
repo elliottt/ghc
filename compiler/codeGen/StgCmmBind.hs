@@ -22,7 +22,6 @@ import StgCmmCon
 import StgCmmHeap
 import StgCmmProf
 import StgCmmTicky
-import StgCmmGran
 import StgCmmLayout
 import StgCmmUtils
 import StgCmmClosure
@@ -58,22 +57,21 @@ import Control.Monad
 -- For closures bound at top level, allocate in static space.
 -- They should have no free variables.
 
-cgTopRhsClosure :: RecFlag              -- member of a recursive group?
+cgTopRhsClosure :: DynFlags
+                -> RecFlag              -- member of a recursive group?
                 -> Id
                 -> CostCentreStack      -- Optional cost centre annotation
                 -> StgBinderInfo
                 -> UpdateFlag
                 -> [Id]                 -- Args
                 -> StgExpr
-                -> FCode (CgIdInfo, FCode ())
+                -> (CgIdInfo, FCode ())
 
-cgTopRhsClosure rec id ccs _ upd_flag args body
- = do { dflags <- getDynFlags
-      ; lf_info <- mkClosureLFInfo id TopLevel [] upd_flag args
-      ; let closure_label = mkLocalClosureLabel (idName id) (idCafInfo id)
-            cg_id_info = litIdInfo dflags id lf_info (CmmLabel closure_label)
-      ; return (cg_id_info, gen_code dflags lf_info closure_label)
-      }
+cgTopRhsClosure dflags rec id ccs _ upd_flag args body =
+  let closure_label = mkLocalClosureLabel (idName id) (idCafInfo id)
+      cg_id_info    = litIdInfo dflags id lf_info (CmmLabel closure_label)
+      lf_info       = mkClosureLFInfo dflags id TopLevel [] upd_flag args
+  in (cg_id_info, gen_code dflags lf_info closure_label)
   where
   -- special case for a indirection (f = g).  We create an IND_STATIC
   -- closure pointing directly to the indirectee.  This is exactly
@@ -106,7 +104,7 @@ cgTopRhsClosure rec id ccs _ upd_flag args body
               caffy         = idCafInfo id
               info_tbl      = mkCmmInfo closure_info -- XXX short-cut
               closure_rep   = mkStaticClosureFields dflags info_tbl ccs caffy []
-      
+
                  -- BUILD THE OBJECT, AND GENERATE INFO TABLE (IF NECESSARY)
         ; emitDataLits closure_label closure_rep
         ; let fv_details :: [(NonVoid Id, VirtualHpOffset)]
@@ -115,7 +113,7 @@ cgTopRhsClosure rec id ccs _ upd_flag args body
         -- Don't drop the non-void args until the closure info has been made
         ; forkClosureBody (closureCodeBody True id closure_info ccs
                                 (nonVoidIds args) (length args) body fv_details)
-      
+
         ; return () }
 
   unLit (CmmLit l) = l
@@ -128,7 +126,7 @@ cgTopRhsClosure rec id ccs _ upd_flag args body
 cgBind :: StgBinding -> FCode ()
 cgBind (StgNonRec name rhs)
   = do  { (info, fcode) <- cgRhs name rhs
-        ; addBindC (cg_id info) info
+        ; addBindC info
         ; init <- fcode
         ; emit init }
         -- init cannot be used in body, so slightly better to sink it eagerly
@@ -316,8 +314,8 @@ mkRhsClosure    dflags bndr _cc _bi
         arity   = length fvs
 
 ---------- Default case ------------------
-mkRhsClosure _ bndr cc _ fvs upd_flag args body
-  = do  { lf_info <- mkClosureLFInfo bndr NotTopLevel fvs upd_flag args
+mkRhsClosure dflags bndr cc _ fvs upd_flag args body
+  = do  { let lf_info = mkClosureLFInfo dflags bndr NotTopLevel fvs upd_flag args
         ; (id_info, reg) <- rhsIdInfo bndr lf_info
         ; return (id_info, gen_code lf_info reg) }
  where
@@ -410,21 +408,22 @@ cgRhsStdThunk bndr lf_info payload
   ; return (mkRhsInit dflags reg lf_info hp_plus_n) }
 
 
-mkClosureLFInfo :: Id           -- The binder
+mkClosureLFInfo :: DynFlags
+                -> Id           -- The binder
                 -> TopLevelFlag -- True of top level
                 -> [NonVoid Id] -- Free vars
                 -> UpdateFlag   -- Update flag
                 -> [Id]         -- Args
-                -> FCode LambdaFormInfo
-mkClosureLFInfo bndr top fvs upd_flag args
-  | null args = return (mkLFThunk (idType bndr) top (map unsafe_stripNV fvs) upd_flag)
+                -> LambdaFormInfo
+mkClosureLFInfo dflags bndr top fvs upd_flag args
+  | null args =
+        mkLFThunk (idType bndr) top (map unsafe_stripNV fvs) upd_flag
   | otherwise =
-      do { arg_descr <- mkArgDescr (idName bndr) args
-         ; return (mkLFReEntrant top (map unsafe_stripNV fvs) args arg_descr) }
+        mkLFReEntrant top (map unsafe_stripNV fvs) args (mkArgDescr dflags args)
 
 
 ------------------------------------------------------------------------
---              The code for closures}
+--              The code for closures
 ------------------------------------------------------------------------
 
 closureCodeBody :: Bool            -- whether this is a top-level binding
@@ -477,7 +476,6 @@ closureCodeBody top_lvl bndr cl_info cc args arity body fv_details
                 ; let node_points = nodeMustPointToIt dflags lf_info
                       node' = if node_points then Just node else Nothing
                 ; when node_points (ldvEnterClosure cl_info)
-                ; granYield arg_regs node_points
 
                 -- Main payload
                 ; entryHeapCheck cl_info node' arity arg_regs $ do
@@ -541,7 +539,6 @@ thunkCode cl_info fv_details _cc node arity body
        ; let node_points = nodeMustPointToIt dflags (closureLFInfo cl_info)
              node'       = if node_points then Just node else Nothing
         ; ldvEnterClosure cl_info -- NB: Node always points when profiling
-        ; granThunk node_points
 
         -- Heap overflow check
         ; entryHeapCheck cl_info node' arity [] $ do
@@ -582,7 +579,7 @@ emitBlackHoleCode node = do
   -- Eager blackholing is normally disabled, but can be turned on with
   -- -feager-blackholing.  When it is on, we replace the info pointer
   -- of the thunk with stg_EAGER_BLACKHOLE_info on entry.
-  
+
   -- If we wanted to do eager blackholing with slop filling, we'd need
   -- to do it at the *end* of a basic block, otherwise we overwrite
   -- the free variables in the thunk that we still need.  We have a
@@ -593,7 +590,7 @@ emitBlackHoleCode node = do
   -- on. But it didn't work, and it wasn't strictly necessary to bring
   -- back minimal ticky-ticky, so now EAGER_BLACKHOLING is
   -- unconditionally disabled. -- krc 1/2007
-  
+
   -- Note the eager-blackholing check is here rather than in blackHoleOnEntry,
   -- because emitBlackHoleCode is called from CmmParse.
 

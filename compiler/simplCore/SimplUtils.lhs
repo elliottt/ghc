@@ -1100,7 +1100,7 @@ mkLam _env bndrs body
       | not (any bad bndrs)
         -- Note [Casts and lambdas]
       = do { lam <- mkLam' dflags bndrs body
-           ; return (mkCast lam (mkPiCos bndrs co)) }
+           ; return (mkCast lam (mkPiCos Representational bndrs co)) }
       where
         co_vars  = tyCoVarsOfCo co
         bad bndr = isCoVar bndr && bndr `elemVarSet` co_vars
@@ -1510,7 +1510,7 @@ prepareAlts tries these things:
 
 Here "cannot match" includes knowledge from GADTs
 
-It's a good idea do do this stuff before simplifying the alternatives, to
+It's a good idea to do this stuff before simplifying the alternatives, to
 avoid simplifying alternatives we know can't happen, and to come up with
 the list of constructors that are handled, to put into the IdInfo of the
 case binder, for use when simplifying the alternatives.

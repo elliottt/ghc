@@ -32,7 +32,7 @@ module DynFlags (
         lang_set,
         whenGeneratingDynamicToo, ifGeneratingDynamicToo,
         whenCannotGenerateDynamicToo,
-        doDynamicToo,
+        dynamicTooMkDynamicDynFlags,
         DynFlags(..),
         HasDynFlags(..), ContainsDynFlags(..),
         RtsOptsEnabled(..),
@@ -413,6 +413,8 @@ data WarningFlag =
    | Opt_WarnIncompletePatterns
    | Opt_WarnIncompleteUniPatterns
    | Opt_WarnIncompletePatternsRecUpd
+   | Opt_WarnOverflowedLiterals
+   | Opt_WarnEmptyEnumerations
    | Opt_WarnMissingFields
    | Opt_WarnMissingImportList
    | Opt_WarnMissingMethods
@@ -533,6 +535,7 @@ data ExtensionFlag
    | Opt_MagicHash
    | Opt_EmptyDataDecls
    | Opt_KindSignatures
+   | Opt_RoleAnnotations
    | Opt_ParallelListComp
    | Opt_TransformListComp
    | Opt_MonadComprehensions
@@ -557,6 +560,7 @@ data ExtensionFlag
    | Opt_LambdaCase
    | Opt_MultiWayIf
    | Opt_TypeHoles
+   | Opt_NegativeLiterals
    | Opt_EmptyCase
    deriving (Eq, Enum, Show)
 
@@ -1176,16 +1180,17 @@ generateDynamicTooConditional dflags canGen cannotGen notTryingToGen
               if b then canGen else cannotGen
       else notTryingToGen
 
-doDynamicToo :: DynFlags -> DynFlags
-doDynamicToo dflags0 = let dflags1 = addWay' WayDyn dflags0
-                           dflags2 = dflags1 {
-                                         outputFile = dynOutputFile dflags1,
-                                         hiSuf = dynHiSuf dflags1,
-                                         objectSuf = dynObjectSuf dflags1
-                                     }
-                           dflags3 = updateWays dflags2
-                           dflags4 = gopt_unset dflags3 Opt_BuildDynamicToo
-                       in dflags4
+dynamicTooMkDynamicDynFlags :: DynFlags -> DynFlags
+dynamicTooMkDynamicDynFlags dflags0
+    = let dflags1 = addWay' WayDyn dflags0
+          dflags2 = dflags1 {
+                        outputFile = dynOutputFile dflags1,
+                        hiSuf = dynHiSuf dflags1,
+                        objectSuf = dynObjectSuf dflags1
+                    }
+          dflags3 = updateWays dflags2
+          dflags4 = gopt_unset dflags3 Opt_BuildDynamicToo
+      in dflags4
 
 -----------------------------------------------------------------------------
 
@@ -2431,6 +2436,8 @@ fWarningFlags = [
   ( "warn-dodgy-foreign-imports",       Opt_WarnDodgyForeignImports, nop ),
   ( "warn-dodgy-exports",               Opt_WarnDodgyExports, nop ),
   ( "warn-dodgy-imports",               Opt_WarnDodgyImports, nop ),
+  ( "warn-overflowed-literals",         Opt_WarnOverflowedLiterals, nop ),
+  ( "warn-empty-enumerations",          Opt_WarnEmptyEnumerations, nop ),
   ( "warn-duplicate-exports",           Opt_WarnDuplicateExports, nop ),
   ( "warn-duplicate-constraints",       Opt_WarnDuplicateConstraints, nop ),
   ( "warn-hi-shadowing",                Opt_WarnHiShadows, nop ),
@@ -2631,6 +2638,7 @@ xFlags = [
   ( "MagicHash",                        Opt_MagicHash, nop ),
   ( "ExistentialQuantification",        Opt_ExistentialQuantification, nop ),
   ( "KindSignatures",                   Opt_KindSignatures, nop ),
+  ( "RoleAnnotations",                  Opt_RoleAnnotations, nop ),
   ( "EmptyDataDecls",                   Opt_EmptyDataDecls, nop ),
   ( "ParallelListComp",                 Opt_ParallelListComp, nop ),
   ( "TransformListComp",                Opt_TransformListComp, nop ),
@@ -2723,6 +2731,7 @@ xFlags = [
   ( "IncoherentInstances",              Opt_IncoherentInstances, nop ),
   ( "PackageImports",                   Opt_PackageImports, nop ),
   ( "TypeHoles",                        Opt_TypeHoles, nop ),
+  ( "NegativeLiterals",                 Opt_NegativeLiterals, nop ),
   ( "EmptyCase",                        Opt_EmptyCase, nop )
   ]
 
@@ -2860,6 +2869,8 @@ standardWarnings
         Opt_WarnPointlessPragmas,
         Opt_WarnDuplicateConstraints,
         Opt_WarnDuplicateExports,
+        Opt_WarnOverflowedLiterals,
+        Opt_WarnEmptyEnumerations,
         Opt_WarnMissingFields,
         Opt_WarnMissingMethods,
         Opt_WarnLazyUnliftedBindings,

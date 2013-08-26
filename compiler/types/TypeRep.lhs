@@ -678,7 +678,7 @@ pprTcApp p pp tc tys
      sep (punctuate comma (map (pp TopPrec) ty_args)))
 
   | not opt_PprStyle_Debug
-  , getUnique tc `elem` [eqTyConKey, eqPrimTyConKey] 
+  , getUnique tc `elem` [eqTyConKey, eqPrimTyConKey, eqReprPrimTyConKey] 
                            -- We need to special case the type equality TyCons because
   , [_, ty1,ty2] <- tys    -- with kind polymorphism it has 3 args, so won't get printed infix
                            -- With -dppr-debug switch this off so we can see the kind
@@ -691,7 +691,7 @@ pprTcApp p pp tc tys
 pprTypeApp :: TyCon -> [Type] -> SDoc
 pprTypeApp tc tys 
   = ppr_type_name_app TopPrec ppr_type (getName tc) (ppr tc) tys
-        -- We have to to use ppr on the TyCon (not its name)
+        -- We have to use ppr on the TyCon (not its name)
         -- so that we get promotion quotes in the right place
 
 pprTypeNameApp :: Prec -> (Prec -> a -> SDoc) -> Name -> [a] -> SDoc
