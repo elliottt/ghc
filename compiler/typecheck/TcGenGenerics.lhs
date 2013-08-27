@@ -89,7 +89,7 @@ genGenericMetaTyCons tc mod =
         s_occ m n = mkGenS tc_occ m n
 
         mkTyCon name = ASSERT( isExternalName name )
-                       buildAlgTyCon name [] Nothing [] distinctAbstractTyConRhs
+                       buildAlgTyCon name [] [] Nothing [] distinctAbstractTyConRhs
                                           NonRecursive 
                                           NotPromotable
                                           False          -- Not GADT syntax

@@ -583,7 +583,7 @@ runPipeline stop_phase hsc_env0 (input_fn, mb_phase)
          when isHaskellishFile $ whenCannotGenerateDynamicToo dflags $ do
              debugTraceMsg dflags 4
                  (text "Running the pipeline again for -dynamic-too")
-             let dflags' = doDynamicToo dflags
+             let dflags' = dynamicTooMkDynamicDynFlags dflags
              hsc_env' <- newHscEnv dflags'
              _ <- runPipeline' start_phase hsc_env' env input_fn
                                maybe_loc maybe_stub_o
@@ -724,7 +724,7 @@ pipeLoop phase input_fn = do
            case phase of
                HscOut {} ->
                    whenGeneratingDynamicToo dflags $ do
-                       setDynFlags $ doDynamicToo dflags
+                       setDynFlags $ dynamicTooMkDynamicDynFlags dflags
                        -- TODO shouldn't ignore result:
                        _ <- pipeLoop phase input_fn
                        return ()
@@ -1116,8 +1116,9 @@ runPhase (RealPhase cc_phase) input_fn dflags
             split_opt | hcc && split_objs = [ "-DUSE_SPLIT_MARKERS" ]
                       | otherwise         = [ ]
 
-        let cc_opt | optLevel dflags >= 2 = "-O2"
-                   | otherwise            = "-O"
+        let cc_opt | optLevel dflags >= 2 = [ "-O2" ]
+                   | optLevel dflags >= 1 = [ "-O" ]
+                   | otherwise            = []
 
         -- Decide next phase
         let next_phase = As
@@ -1187,7 +1188,8 @@ runPhase (RealPhase cc_phase) input_fn dflags
                              then gcc_extra_viac_flags ++ more_hcc_opts
                              else [])
                        ++ verbFlags
-                       ++ [ "-S", cc_opt ]
+                       ++ [ "-S" ]
+                       ++ cc_opt
                        ++ [ "-D__GLASGOW_HASKELL__="++cProjectVersionInt ]
                        ++ framework_paths
                        ++ split_opt
@@ -1938,15 +1940,16 @@ linkBinary dflags o_files dep_packages = do
 exeFileName :: DynFlags -> FilePath
 exeFileName dflags
   | Just s <- outputFile dflags =
-      if platformOS (targetPlatform dflags) == OSMinGW32
-      then if null (takeExtension s)
-           then s <.> "exe"
-           else s
-      else s
+      case platformOS (targetPlatform dflags) of 
+          OSMinGW32 -> s <?.> "exe"
+          OSiOS     -> s <?.> "a"
+          _         -> s
   | otherwise =
       if platformOS (targetPlatform dflags) == OSMinGW32
       then "main.exe"
       else "a.out"
+ where s <?.> ext | null (takeExtension s) = s <.> ext
+                  | otherwise              = s
 
 maybeCreateManifest
    :: DynFlags

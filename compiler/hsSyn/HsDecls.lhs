@@ -488,6 +488,8 @@ data FamilyDecl name = FamilyDecl
 data FamilyInfo name
   = DataFamily
   | OpenTypeFamily
+     -- this list might be empty, if we're in an hs-boot file and the user
+     -- said "type family Foo x where .."
   | ClosedTypeFamily [LTyFamInstEqn name]
   deriving( Data, Typeable )
 
@@ -638,7 +640,9 @@ instance (OutputableBndr name) => Outputable (FamilyDecl name) where
                       Just kind -> dcolon <+> ppr kind
           (pp_where, pp_eqns) = case info of
             ClosedTypeFamily eqns -> ( ptext (sLit "where")
-                                     , vcat $ map ppr eqns )
+                                     , if null eqns
+                                       then ptext (sLit "..")
+                                       else vcat $ map ppr eqns )
             _                     -> (empty, empty)
 
 pprFlavour :: FamilyInfo name -> SDoc

@@ -45,6 +45,7 @@ module CoreUtils (
 
 import CoreSyn
 import PprCore
+import CoreFVs( exprFreeVars )
 import Var
 import SrcLoc
 import VarEnv
@@ -187,9 +188,12 @@ mkCast (Coercion e_co) co
   = Coercion (mkCoCast e_co co)
 
 mkCast (Cast expr co2) co
-  = ASSERT(let { Pair  from_ty  _to_ty  = coercionKind co;
-                 Pair _from_ty2  to_ty2 = coercionKind co2} in
-           from_ty `eqType` to_ty2 )
+  = WARN(let { Pair  from_ty  _to_ty  = coercionKind co;
+               Pair _from_ty2  to_ty2 = coercionKind co2} in
+            not (from_ty `eqType` to_ty2),
+             vcat ([ ptext (sLit "expr:") <+> ppr expr
+                   , ptext (sLit "co2:") <+> ppr co2
+                   , ptext (sLit "co:") <+> ppr co ]) )
     mkCast expr (mkTransCo co2 co)
 
 mkCast expr co
@@ -1526,6 +1530,11 @@ are going to avoid allocating this thing altogether.
 
 There are some particularly delicate points here:
 
+* We want to eta-reduce if doing so leaves a trivial expression,
+  *including* a cast.  For example
+       \x. f |> co  -->  f |> co
+  (provided co doesn't mention x)
+
 * Eta reduction is not valid in general:
         \x. bot  /=  bot
   This matters, partly for old-fashioned correctness reasons but,
@@ -1542,7 +1551,7 @@ There are some particularly delicate points here:
   Result: seg-fault because the boolean case actually gets a function value.
   See Trac #1947.
 
-  So it's important to to the right thing.
+  So it's important to do the right thing.
 
 * Note [Arity care]: we need to be careful if we just look at f's
   arity. Currently (Dec07), f's arity is visible in its own RHS (see
@@ -1602,7 +1611,7 @@ need to address that here.
 \begin{code}
 tryEtaReduce :: [Var] -> CoreExpr -> Maybe CoreExpr
 tryEtaReduce bndrs body
-  = go (reverse bndrs) body (mkReflCo (exprType body))
+  = go (reverse bndrs) body (mkReflCo Representational (exprType body))
   where
     incoming_arity = count isId bndrs
 
@@ -1613,7 +1622,11 @@ tryEtaReduce bndrs body
     -- See Note [Eta reduction with casted arguments]
     -- for why we have an accumulating coercion
     go [] fun co
-      | ok_fun fun = Just (mkCast fun co)
+      | ok_fun fun 
+      , let result = mkCast fun co
+      , not (any (`elemVarSet` exprFreeVars result) bndrs)
+      = Just result   -- Check for any of the binders free in the result
+                      -- including the accumulated coercion
 
     go (b : bs) (App fun arg) co
       | Just co' <- ok_arg b arg co
@@ -1623,13 +1636,10 @@ tryEtaReduce bndrs body
 
     ---------------
     -- Note [Eta reduction conditions]
-    ok_fun (App fun (Type ty))
-        | not (any (`elemVarSet` tyVarsOfType ty) bndrs)
-        =  ok_fun fun
-    ok_fun (Var fun_id)
-        =  not (fun_id `elem` bndrs)
-        && (ok_fun_id fun_id || all ok_lam bndrs)
-    ok_fun _fun = False
+    ok_fun (App fun (Type {})) = ok_fun fun
+    ok_fun (Cast fun _)        = ok_fun fun
+    ok_fun (Var fun_id)        = ok_fun_id fun_id || all ok_lam bndrs
+    ok_fun _fun                = False
 
     ---------------
     ok_fun_id fun = fun_arity fun >= incoming_arity
@@ -1659,9 +1669,10 @@ tryEtaReduce bndrs body
        | Just tv <- getTyVar_maybe ty
        , bndr == tv  = Just (mkForAllCo tv co)
     ok_arg bndr (Var v) co
-       | bndr == v   = Just (mkFunCo (mkReflCo (idType bndr)) co)
+       | bndr == v   = Just (mkFunCo Representational
+                                     (mkReflCo Representational (idType bndr)) co)
     ok_arg bndr (Cast (Var v) co_arg) co
-       | bndr == v  = Just (mkFunCo (mkSymCo co_arg) co)
+       | bndr == v  = Just (mkFunCo Representational (mkSymCo co_arg) co)
        -- The simplifier combines multiple casts into one,
        -- so we can have a simple-minded pattern match here
     ok_arg _ _ _ = Nothing
