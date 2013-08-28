@@ -227,13 +227,13 @@ instance Binary IfaceDecl where
                     a7 <- get bh
                     a8 <- get bh
                     occ <- return $! mkOccNameFS clsName a2
-                    return (IfaceClass a1 occ a3 a4 a5 a6 a7)
+                    return (IfaceClass a1 occ a3 a4 a5 a6 a7 a8)
             5 -> do a1 <- get bh
                     a2 <- get bh
                     a3 <- get bh
                     a4 <- get bh
                     occ <- return $! mkOccNameFS tcName a1
-                    return (IfaceAxiom occ a2 a3)
+                    return (IfaceAxiom occ a2 a3 a4)
             6 -> do a1 <- get bh
                     a2 <- get bh
                     a3 <- get bh
@@ -1093,10 +1093,10 @@ pprIfaceDecl (IfaceSyn {ifName = tycon, ifTyVars = tyvars, ifRoles = roles,
   = hang (ptext (sLit "type family") <+> pprIfaceDeclHead [] tycon tyvars roles)
        4 (dcolon <+> ppr kind)
 
-<<<<<<< HEAD
 pprIfaceDecl IfaceDataKind {ifName = kcon, ifKVars = kvars,
                             ifTyCons = tycons }
-  = hang (ptext (sLit "data kind") <+> pprIfaceDeclHead [] kcon kvars) 4 $
+  -- XXX what should the roles argument be here?
+  = hang (ptext (sLit "data kind") <+> pprIfaceDeclHead [] kcon kvars []) 4 $
     if null tycons
        then empty
        else equals <+> sep (punctuate (ptext (sLit " |")) (map pprIfaceTyConDecl tycons))

@@ -820,6 +820,7 @@ mkKindCon _rec_info tycons KindDecl { tcdLName  = L _ kind_name
        kind_name
        sKind
        kvars
+       [] -- XXX roles here?
        Nothing
        []
        (DataKindTyCon tycons)

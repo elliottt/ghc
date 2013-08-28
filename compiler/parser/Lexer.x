@@ -57,7 +57,6 @@ module Lexer (
    extension, bangPatEnabled, datatypeContextsEnabled,
    traditionalRecordSyntaxEnabled,
    dataKindsEnabled,
-   typeLiteralsEnabled,
    explicitForallEnabled,
    inRulePrag,
    explicitNamespacesEnabled, sccProfilingOn, hpcEnabled,

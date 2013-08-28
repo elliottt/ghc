@@ -449,6 +449,7 @@ tc_iface_decl _ _ IfaceDataKind {ifName = occ_name,
                kc_name
                sKind
                kvs'
+               []
                Nothing
                []
                (DataKindTyCon cons)

@@ -141,7 +141,7 @@ mkTyData loc new_or_data promotable cType (L _ (mcxt, tycl_hdr)) ksig data_cons 
        ; when (not promotable) $ do
            pstate  <- getPState
            let enabled = xopt Opt_DataKinds (dflags pstate)
-           unless enabled (parseError loc "Illegal `data type` declaration (use -XDataKinds to enable)")
+           unless enabled (parseErrorSDoc loc (text "Illegal `data type` declaration (use -XDataKinds to enable)"))
        ; defn <- mkDataDefn new_or_data promotable cType mcxt ksig data_cons maybe_deriv
        ; return (L loc (DataDecl { tcdLName = tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
@@ -156,7 +156,7 @@ mkTyDataKind loc k_hdr ty_cons
        ; unless (null kparamTys) $ do
            pstate  <- getPState
            let enabled = xopt Opt_PolyKinds (dflags pstate)
-           unless enabled (parseError loc "Illegal polymorphic `data kind` declaration (use -XPolyKinds to enable)")
+           unless enabled (parseErrorSDoc loc (text "Illegal polymorphic `data kind` declaration (use -XPolyKinds to enable)"))
        ; kparams  <- checkTyVars k_hdr kparamTys
        ; kvars    <- checkKVars kparams
        ; return $ L loc $ KindDecl
@@ -175,8 +175,8 @@ mkTyDataKind loc k_hdr ty_cons
     | otherwise                    = mapM checkKVar (hsq_tvs tparams)
 
   checkKVar bndr = case unLoc bndr of
-    UserTyVar n    -> return (L (getLoc bndr) n)
-    KindedTyVar {} -> parseError (getLoc bndr) "kind parameters may not have sort signatures"
+    HsTyVarBndr n Nothing _  -> return (L (getLoc bndr) n)
+    HsTyVarBndr _ (Just _) _ -> parseErrorSDoc (getLoc bndr) (text "kind parameters may not have sort signatures")
 
 
 mkFamInstData :: SrcSpan
@@ -414,7 +414,7 @@ toTyConDetails :: SrcSpan -> HsConDeclDetails RdrName -> P (HsTyConDeclDetails R
 toTyConDetails loc details = case details of
   PrefixCon args -> return (PrefixCon args)
   InfixCon l r   -> return (InfixCon l r)
-  RecCon _       -> parseError loc "record notation is not allowd in a `data kind` declaration"
+  RecCon _       -> parseErrorSDoc loc (text "record notation is not allowd in a `data kind` declaration")
 
 mkDeprecatedGadtRecordDecl :: SrcSpan
                            -> Located RdrName

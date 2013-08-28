@@ -1082,6 +1082,8 @@ mkPromotedDataCon con name unique kind roles
         tc_kind     = kind,
         parentTyCon = dataConTyCon con
   }
+  where
+    arity = length roles
 
 -- | Construct a type constructor for a type introduced by a 'data kind'
 -- declaration.
@@ -1091,11 +1093,10 @@ mkDataKindTyCon kc name kind
         tyConName   = name,
         tyConUnique = nameUnique name,
         tyConArity  = 0,
+        tc_roles    = [], -- XXX is this correct?
         tc_kind     = kind,
         parentTyCon = kc
   }
-  where
-    arity = length roles
 
 -- | Create a promoted type constructor 'TyCon'
 -- Somewhat dodgily, we give it the same Name
