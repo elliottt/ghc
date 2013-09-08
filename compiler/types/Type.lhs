@@ -85,7 +85,7 @@ module Type (
         constraintKindTyCon, anyKindTyCon,
 
         -- * Type free variables
-        tyVarsOfType, tyVarsOfTypes,
+        tyVarsOfType, tyVarsOfTypes, closeOverKinds,
         expandTypeSynonyms,
         typeSize, varSetElemsKvsFirst,
 
@@ -166,12 +166,10 @@ import CoAxiom
 -- others
 import Unique           ( Unique, hasKey )
 import BasicTypes       ( Arity, RepArity )
-import StaticFlags
 import Util
 import Outputable
 import FastString
 
-import Data.List        ( partition )
 import Maybes           ( orElse )
 import Data.Maybe       ( isJust )
 import Control.Monad    ( guard )
@@ -995,13 +993,6 @@ typeSize (AppTy t1 t2)   = typeSize t1 + typeSize t2
 typeSize (FunTy t1 t2)   = typeSize t1 + typeSize t2
 typeSize (ForAllTy _ t)  = 1 + typeSize t
 typeSize (TyConApp _ ts) = 1 + sum (map typeSize ts)
-
-varSetElemsKvsFirst :: VarSet -> [TyVar]
--- {k1,a,k2,b} --> [k1,k2,a,b]
-varSetElemsKvsFirst set
-  = kvs ++ tvs
-  where
-    (kvs, tvs) = partition isKindVar (varSetElems set)
 \end{code}
 
 
@@ -1101,25 +1092,10 @@ isClosedAlgType ty
 \begin{code}
 -- | Computes whether an argument (or let right hand side) should
 -- be computed strictly or lazily, based only on its type.
--- Works just like 'isUnLiftedType', except that it has a special case
--- for dictionaries (i.e. does not work purely on representation types)
+-- Currently, it's just 'isUnLiftedType'.
 
--- Since it takes account of class 'PredType's, you might think
--- this function should be in 'TcType', but 'isStrictType' is used by 'DataCon',
--- which is below 'TcType' in the hierarchy, so it's convenient to put it here.
---
--- We may be strict in dictionary types, but only if it
--- has more than one component.
---
--- (Being strict in a single-component dictionary risks
---  poking the dictionary component, which is wrong.)
 isStrictType :: Type -> Bool
-isStrictType ty | Just ty' <- coreView ty = isStrictType ty'
-isStrictType (ForAllTy _ ty)   = isStrictType ty
-isStrictType (TyConApp tc _)
- | isUnLiftedTyCon tc               = True
- | isClassTyCon tc, opt_DictsStrict = True
-isStrictType _                      = False
+isStrictType = isUnLiftedType
 \end{code}
 
 \begin{code}

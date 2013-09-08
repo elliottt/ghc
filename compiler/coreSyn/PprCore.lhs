@@ -422,7 +422,6 @@ instance Outputable UnfoldingGuidance where
 
 instance Outputable UnfoldingSource where
   ppr InlineCompulsory  = ptext (sLit "Compulsory")
-  ppr (InlineWrapper w) = ptext (sLit "Worker=") <> ppr w
   ppr InlineStable      = ptext (sLit "InlineStable")
   ppr InlineRhs         = ptext (sLit "<vanilla>")
 

@@ -66,7 +66,7 @@ module DynFlags (
         ghcUsagePath, ghciUsagePath, topDir, tmpDir, rawSettings,
         extraGccViaCFlags, systemPackageConfig,
         pgm_L, pgm_P, pgm_F, pgm_c, pgm_s, pgm_a, pgm_l, pgm_dll, pgm_T,
-        pgm_sysman, pgm_windres, pgm_lo, pgm_lc,
+        pgm_sysman, pgm_windres, pgm_libtool, pgm_lo, pgm_lc,
         opt_L, opt_P, opt_F, opt_c, opt_a, opt_l,
         opt_windres, opt_lo, opt_lc,
 
@@ -101,6 +101,7 @@ module DynFlags (
         flagsPackage,
 
         supportedLanguagesAndExtensions,
+        languageExtensions,
 
         -- ** DynFlags C compiler options
         picCCOpts, picPOpts,
@@ -277,6 +278,7 @@ data GeneralFlag
 
    -- optimisation opts
    | Opt_Strictness
+   | Opt_LateDmdAnal
    | Opt_KillAbsence
    | Opt_KillOneShot
    | Opt_FullLaziness
@@ -306,6 +308,8 @@ data GeneralFlag
    | Opt_OmitYields
    | Opt_SimpleListLiterals
    | Opt_FunToThunk               -- allow WwLib.mkWorkerArgs to remove all value lambdas
+   | Opt_DictsStrict                     -- be strict in argument dictionaries
+   | Opt_DmdTxDictSel              -- use a special demand transformer for dictionary selectors
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -487,6 +491,7 @@ data ExtensionFlag
    | Opt_InterruptibleFFI
    | Opt_CApiFFI
    | Opt_GHCForeignImportPrim
+   | Opt_JavaScriptFFI
    | Opt_ParallelArrays           -- Syntactic support for parallel arrays
    | Opt_Arrows                   -- Arrow-notation syntax
    | Opt_TemplateHaskell
@@ -500,6 +505,7 @@ data ExtensionFlag
    | Opt_TypeFamilies
    | Opt_OverloadedStrings
    | Opt_OverloadedLists
+   | Opt_NumDecimals
    | Opt_DisambiguateRecordFields
    | Opt_RecordWildCards
    | Opt_RecordPuns
@@ -513,7 +519,7 @@ data ExtensionFlag
    | Opt_PolyKinds                -- Kind polymorphism
    | Opt_DataKinds                -- Datatype promotion
    | Opt_InstanceSigs
- 
+
    | Opt_StandaloneDeriving
    | Opt_DeriveDataTypeable
    | Opt_AutoDeriveTypeable       -- Automatic derivation of Typeable
@@ -579,6 +585,8 @@ data DynFlags = DynFlags {
   ruleCheck             :: Maybe String,
   strictnessBefore      :: [Int],       -- ^ Additional demand analysis
 
+  maxRelevantBinds      :: Maybe Int,   -- ^ Maximum number of bindings from the type envt
+                                        --   to show in type error messages
   simplTickFactor       :: Int,         -- ^ Multiplier for simplifier ticks
   specConstrThreshold   :: Maybe Int,   -- ^ Threshold for SpecConstr
   specConstrCount       :: Maybe Int,   -- ^ Max number of specialisations for any one function
@@ -587,6 +595,7 @@ data DynFlags = DynFlags {
   liberateCaseThreshold :: Maybe Int,   -- ^ Threshold for LiberateCase
   floatLamArgs          :: Maybe Int,   -- ^ Arg count for lambda floating
                                         --   See CoreMonad.FloatOutSwitches
+
   historySize           :: Int,
 
   cmdlineHcIncludes     :: [String],    -- ^ @\-\#includes@
@@ -798,6 +807,7 @@ data Settings = Settings {
   sPgm_T                 :: String,
   sPgm_sysman            :: String,
   sPgm_windres           :: String,
+  sPgm_libtool           :: String,
   sPgm_lo                :: (String,[Option]), -- LLVM: opt llvm optimiser
   sPgm_lc                :: (String,[Option]), -- LLVM: llc static compiler
   -- options for particular phases
@@ -853,6 +863,8 @@ pgm_sysman            :: DynFlags -> String
 pgm_sysman dflags = sPgm_sysman (settings dflags)
 pgm_windres           :: DynFlags -> String
 pgm_windres dflags = sPgm_windres (settings dflags)
+pgm_libtool           :: DynFlags -> String
+pgm_libtool dflags = sPgm_libtool (settings dflags)
 pgm_lo                :: DynFlags -> (String,[Option])
 pgm_lo dflags = sPgm_lo (settings dflags)
 pgm_lc                :: DynFlags -> (String,[Option])
@@ -948,6 +960,7 @@ data GhcLink
   | LinkInMemory        -- ^ Use the in-memory dynamic linker (works for both
                         --   bytecode and object code).
   | LinkDynLib          -- ^ Link objects into a dynamic lib (DLL on Windows, DSO on ELF platforms)
+  | LinkStaticLib       -- ^ Link objects into a static lib
   deriving (Eq, Show)
 
 isNoLink :: GhcLink -> Bool
@@ -1011,7 +1024,8 @@ data RtsOptsEnabled = RtsOptsNone | RtsOptsSafeOnly | RtsOptsAll
 -- this compilation.
 
 data Way
-  = WayThreaded
+  = WayCustom String -- for GHC API clients building custom variants
+  | WayThreaded
   | WayDebug
   | WayProf
   | WayEventLog
@@ -1037,6 +1051,7 @@ allowed_combination way = and [ x `allowedWith` y
         _ `allowedWith` WayDebug                = True
         WayDebug `allowedWith` _                = True
 
+        (WayCustom {}) `allowedWith` _          = True
         WayProf `allowedWith` WayNDP            = True
         WayThreaded `allowedWith` WayProf       = True
         WayThreaded `allowedWith` WayEventLog   = True
@@ -1046,6 +1061,7 @@ mkBuildTag :: [Way] -> String
 mkBuildTag ways = concat (intersperse "_" (map wayTag ways))
 
 wayTag :: Way -> String
+wayTag (WayCustom xs) = xs
 wayTag WayThreaded = "thr"
 wayTag WayDebug    = "debug"
 wayTag WayDyn      = "dyn"
@@ -1056,6 +1072,7 @@ wayTag WayGran     = "mg"
 wayTag WayNDP      = "ndp"
 
 wayRTSOnly :: Way -> Bool
+wayRTSOnly (WayCustom {}) = False
 wayRTSOnly WayThreaded = True
 wayRTSOnly WayDebug    = True
 wayRTSOnly WayDyn      = False
@@ -1066,6 +1083,7 @@ wayRTSOnly WayGran     = False
 wayRTSOnly WayNDP      = False
 
 wayDesc :: Way -> String
+wayDesc (WayCustom xs) = xs
 wayDesc WayThreaded = "Threaded"
 wayDesc WayDebug    = "Debug"
 wayDesc WayDyn      = "Dynamic"
@@ -1077,6 +1095,7 @@ wayDesc WayNDP      = "Nested data parallelism"
 
 -- Turn these flags on when enabling this way
 wayGeneralFlags :: Platform -> Way -> [GeneralFlag]
+wayGeneralFlags _ (WayCustom {}) = []
 wayGeneralFlags _ WayThreaded = []
 wayGeneralFlags _ WayDebug    = []
 wayGeneralFlags _ WayDyn      = [Opt_PIC]
@@ -1088,6 +1107,7 @@ wayGeneralFlags _ WayNDP      = []
 
 -- Turn these flags off when enabling this way
 wayUnsetGeneralFlags :: Platform -> Way -> [GeneralFlag]
+wayUnsetGeneralFlags _ (WayCustom {}) = []
 wayUnsetGeneralFlags _ WayThreaded = []
 wayUnsetGeneralFlags _ WayDebug    = []
 wayUnsetGeneralFlags _ WayDyn      = [-- There's no point splitting objects
@@ -1102,6 +1122,7 @@ wayUnsetGeneralFlags _ WayGran     = []
 wayUnsetGeneralFlags _ WayNDP      = []
 
 wayExtras :: Platform -> Way -> DynFlags -> DynFlags
+wayExtras _ (WayCustom {}) dflags = dflags
 wayExtras _ WayThreaded dflags = dflags
 wayExtras _ WayDebug    dflags = dflags
 wayExtras _ WayDyn      dflags = dflags
@@ -1113,6 +1134,7 @@ wayExtras _ WayNDP      dflags = setExtensionFlag' Opt_ParallelArrays
                                $ setGeneralFlag' Opt_Vectorise dflags
 
 wayOptc :: Platform -> Way -> [String]
+wayOptc _ (WayCustom {}) = []
 wayOptc platform WayThreaded = case platformOS platform of
                                OSOpenBSD -> ["-pthread"]
                                OSNetBSD  -> ["-pthread"]
@@ -1126,6 +1148,7 @@ wayOptc _ WayGran       = ["-DGRAN"]
 wayOptc _ WayNDP        = []
 
 wayOptl :: Platform -> Way -> [String]
+wayOptl _ (WayCustom {}) = []
 wayOptl platform WayThreaded =
         case platformOS platform of
         -- FreeBSD's default threading library is the KSE-based M:N libpthread,
@@ -1148,6 +1171,7 @@ wayOptl _ WayGran       = []
 wayOptl _ WayNDP        = []
 
 wayOptP :: Platform -> Way -> [String]
+wayOptP _ (WayCustom {}) = []
 wayOptP _ WayThreaded = []
 wayOptP _ WayDebug    = []
 wayOptP _ WayDyn      = []
@@ -1242,12 +1266,14 @@ defaultDynFlags mySettings =
         maxSimplIterations      = 4,
         shouldDumpSimplPhase    = Nothing,
         ruleCheck               = Nothing,
+        maxRelevantBinds        = Just 6,
         simplTickFactor         = 100,
         specConstrThreshold     = Just 2000,
         specConstrCount         = Just 3,
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
         floatLamArgs            = Just 0, -- Default: float only if no fvs
+
         historySize             = 20,
         strictnessBefore        = [],
 
@@ -1671,7 +1697,7 @@ setObjectDir, setHiDir, setStubDir, setDumpDir, setOutputDir,
          setDylibInstallName,
          setObjectSuf, setHiSuf, setHcSuf, parseDynLibLoaderMode,
          setPgmP, addOptl, addOptc, addOptP,
-         addCmdlineFramework, addHaddockOpts, addGhciScript, 
+         addCmdlineFramework, addHaddockOpts, addGhciScript,
          setInteractivePrint
    :: String -> DynFlags -> DynFlags
 setOutputFile, setDynOutputFile, setOutputHi, setDumpPrefixForce
@@ -1956,7 +1982,7 @@ safeFlagCheck cmdl dflags =
 
         apFix f = if safeInferOn dflags then id else f
 
-        safeFailure loc str 
+        safeFailure loc str
            = [L loc $ str ++ " is not allowed in Safe Haskell; ignoring " ++ str]
 
 {- **********************************************************************
@@ -2044,6 +2070,7 @@ dynamic_flags = [
   , Flag "pgml"           (hasArg (\f -> alterSettings (\s -> s { sPgm_l   = (f,[])})))
   , Flag "pgmdll"         (hasArg (\f -> alterSettings (\s -> s { sPgm_dll = (f,[])})))
   , Flag "pgmwindres"     (hasArg (\f -> alterSettings (\s -> s { sPgm_windres = f})))
+  , Flag "pgmlibtool"     (hasArg (\f -> alterSettings (\s -> s { sPgm_libtool = f})))
 
     -- need to appear before -optl/-opta to be parsed as LLVM flags.
   , Flag "optlo"          (hasArg (\f -> alterSettings (\s -> s { sOpt_lo  = f : sOpt_lo s})))
@@ -2078,6 +2105,7 @@ dynamic_flags = [
         -------- Linking ----------------------------------------------------
   , Flag "no-link"            (noArg (\d -> d{ ghcLink=NoLink }))
   , Flag "shared"             (noArg (\d -> d{ ghcLink=LinkDynLib }))
+  , Flag "staticlib"          (noArg (\d -> d{ ghcLink=LinkStaticLib }))
   , Flag "dynload"            (hasArg parseDynLibLoaderMode)
   , Flag "dylib-install-name" (hasArg setDylibInstallName)
     -- -dll-split is an internal flag, used only during the GHC build
@@ -2281,6 +2309,9 @@ dynamic_flags = [
   , Flag "O"      (optIntSuffixM (\mb_n -> setOptLevel (mb_n `orElse` 1)))
                 -- If the number is missing, use 1
 
+
+  , Flag "fmax-relevant-binds"         (intSuffix (\n d -> d{ maxRelevantBinds = Just n }))
+  , Flag "fno-max-relevant-binds"      (noArg (\d -> d{ maxRelevantBinds = Nothing }))
   , Flag "fsimplifier-phases"          (intSuffix (\n d -> d{ simplPhases = n }))
   , Flag "fmax-simplifier-iterations"  (intSuffix (\n d -> d{ maxSimplIterations = n }))
   , Flag "fsimpl-tick-factor"          (intSuffix (\n d -> d{ simplTickFactor = n }))
@@ -2296,6 +2327,7 @@ dynamic_flags = [
   , Flag "fstrictness-before"          (intSuffix (\n d -> d{ strictnessBefore = n : strictnessBefore d }))
   , Flag "ffloat-lam-args"             (intSuffix (\n d -> d{ floatLamArgs = Just n }))
   , Flag "ffloat-all-lams"             (noArg (\d -> d{ floatLamArgs = Nothing }))
+
   , Flag "fhistory-size"               (intSuffix (\n d -> d{ historySize = n }))
 
   , Flag "funfolding-creation-threshold" (intSuffix   (\n d -> d {ufCreationThreshold = n}))
@@ -2500,6 +2532,7 @@ fFlags = [
   ( "error-spans",                      Opt_ErrorSpans, nop ),
   ( "print-explicit-foralls",           Opt_PrintExplicitForalls, nop ),
   ( "strictness",                       Opt_Strictness, nop ),
+  ( "late-dmd-anal",                    Opt_LateDmdAnal, nop ),
   ( "specialise",                       Opt_Specialise, nop ),
   ( "float-in",                         Opt_FloatIn, nop ),
   ( "static-argument-transformation",   Opt_StaticArgumentTransformation, nop ),
@@ -2559,14 +2592,16 @@ fFlags = [
   ( "flat-cache",                       Opt_FlatCache, nop ),
   ( "use-rpaths",                       Opt_RPath, nop ),
   ( "kill-absence",                     Opt_KillAbsence, nop),
-  ( "kill-one-shot",                    Opt_KillOneShot, nop)
+  ( "kill-one-shot",                    Opt_KillOneShot, nop),
+  ( "dicts-strict",                     Opt_DictsStrict, nop ),
+  ( "dmd-tx-dict-sel",                  Opt_DmdTxDictSel, nop )
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
 fLangFlags :: [FlagSpec ExtensionFlag]
 fLangFlags = [
   ( "th",                               Opt_TemplateHaskell,
-    \on -> deprecatedForExtension "TemplateHaskell" on 
+    \on -> deprecatedForExtension "TemplateHaskell" on
         >> checkTemplateHaskellOk on ),
   ( "fi",                               Opt_ForeignFunctionInterface,
     deprecatedForExtension "ForeignFunctionInterface" ),
@@ -2648,6 +2683,7 @@ xFlags = [
   ( "InterruptibleFFI",                 Opt_InterruptibleFFI, nop ),
   ( "CApiFFI",                          Opt_CApiFFI, nop ),
   ( "GHCForeignImportPrim",             Opt_GHCForeignImportPrim, nop ),
+  ( "JavaScriptFFI",                    Opt_JavaScriptFFI, nop ),
   ( "LiberalTypeSynonyms",              Opt_LiberalTypeSynonyms, nop ),
 
   ( "PolymorphicComponents",            Opt_RankNTypes, nop),
@@ -2658,7 +2694,7 @@ xFlags = [
   ( "TypeOperators",                    Opt_TypeOperators, nop ),
   ( "ExplicitNamespaces",               Opt_ExplicitNamespaces, nop ),
   ( "RecursiveDo",                      Opt_RecursiveDo, nop ),  -- Enables 'mdo' and 'rec'
-  ( "DoRec",                            Opt_RecursiveDo, 
+  ( "DoRec",                            Opt_RecursiveDo,
      deprecatedForExtension "RecursiveDo" ),
   ( "Arrows",                           Opt_Arrows, nop ),
   ( "ParallelArrays",                   Opt_ParallelArrays, nop ),
@@ -2671,6 +2707,7 @@ xFlags = [
     deprecatedForExtension "NamedFieldPuns" ),
   ( "DisambiguateRecordFields",         Opt_DisambiguateRecordFields, nop ),
   ( "OverloadedStrings",                Opt_OverloadedStrings, nop ),
+  ( "NumDecimals",                      Opt_NumDecimals, nop),
   ( "OverloadedLists",                  Opt_OverloadedLists, nop),
   ( "GADTs",                            Opt_GADTs, nop ),
   ( "GADTSyntax",                       Opt_GADTSyntax, nop ),
@@ -2812,6 +2849,8 @@ impliedFlags
     -- `IP "x" Int`, which requires a flexible context/instance.
     , (Opt_ImplicitParams, turnOn, Opt_FlexibleContexts)
     , (Opt_ImplicitParams, turnOn, Opt_FlexibleInstances)
+
+    , (Opt_JavaScriptFFI, turnOn, Opt_InterruptibleFFI)
   ]
 
 optLevelFlags :: [([Int], GeneralFlag)]
@@ -2838,6 +2877,8 @@ optLevelFlags
     , ([0,1,2], Opt_LlvmTBAA)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CmmElimCommonBlocks)
+
+    , ([0,1,2],     Opt_DmdTxDictSel)
 
 --     , ([2],     Opt_StaticArgumentTransformation)
 -- Max writes: I think it's probably best not to enable SAT with -O2 for the
