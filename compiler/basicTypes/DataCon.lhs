@@ -20,6 +20,7 @@ module DataCon (
 	-- ** Type construction
 	mkDataCon, fIRST_TAG,
         buildAlgTyCon, 
+        buildAlgTyConLevel,
 	
 	-- ** Type deconstruction
 	dataConRepType, dataConSig, dataConFullSig,
@@ -1012,11 +1013,27 @@ buildAlgTyCon :: Name
               -> TyConParent
 	      -> TyCon
 
-buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs 
+buildAlgTyCon = buildAlgTyConLevel True
+
+buildAlgTyConLevel :: Bool
+              -> Name 
+              -> [TyVar]               -- ^ Kind variables and type variables
+              -> [Role]
+	      -> Maybe CType
+	      -> ThetaType	       -- ^ Stupid theta
+	      -> AlgTyConRhs
+	      -> RecFlag
+	      -> Bool		       -- ^ True <=> this TyCon is promotable
+	      -> Bool		       -- ^ True <=> was declared in GADT syntax
+              -> TyConParent
+	      -> TyCon
+
+buildAlgTyConLevel isType tc_name ktvs roles cType stupid_theta rhs 
               is_rec is_promotable gadt_syn parent
   = tc
   where 
-    kind = mkPiKinds ktvs liftedTypeKind
+    kind | isType    = mkPiKinds ktvs liftedTypeKind
+         | otherwise = mkArrowKinds (map tyVarKind ktvs) superKind
 
     -- tc and mb_promoted_tc are mutually recursive
     tc = mkAlgTyCon tc_name kind ktvs roles cType stupid_theta 
@@ -1025,6 +1042,7 @@ buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs
 
     mb_promoted_tc
       | is_promotable = Just (mkPromotedTyCon tc (promoteKind kind))
+      | not isType    = Just tc -- note, this is an infinite cycle
       | otherwise     = Nothing
 \end{code}
 

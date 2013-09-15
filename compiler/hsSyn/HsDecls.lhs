@@ -16,7 +16,8 @@ module HsDecls (
   HsDecl(..), LHsDecl, HsDataDefn(..),
   -- ** Class or type declarations
   TyClDecl(..), LTyClDecl, TyClGroup,
-  isClassDecl, isDataDecl, isKindDecl, isSynDecl, tcdName,
+  isClassDecl, isDataDecl, isSynDecl, tcdName,
+  isKindDecl, isTypeOnlyDecl,
   isFamilyDecl, isTypeFamilyDecl, isDataFamilyDecl,
   isOpenTypeFamilyInfo, isClosedTypeFamilyInfo,
   tyFamInstDeclName, tyFamInstDeclLName,
@@ -501,6 +502,10 @@ isDataDecl _other        = False
 isKindDecl :: TyClDecl name -> Bool
 isKindDecl (DataDecl { tcdDataDefn = HsDataDefn { dd_try_promote = KindOnly }}) = True
 isKindDecl _                                                                    = False
+
+isTypeOnlyDecl :: TyClDecl name -> Bool
+isTypeOnlyDecl (DataDecl { tcdDataDefn = HsDataDefn { dd_try_promote = TypeOnly }}) = True
+isTypeOnlyDecl _                                                                    = False
 
 -- | type or type instance declaration
 isSynDecl :: TyClDecl name -> Bool

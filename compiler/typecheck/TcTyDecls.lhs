@@ -361,11 +361,11 @@ data RecTyInfo = RTI { rti_promotable :: Bool
                      , rti_roles      :: Name -> [Role]
                      , rti_is_rec     :: Name -> RecFlag }
 
-calcRecFlags :: ModDetails -> RoleAnnots -> [TyThing] -> RecTyInfo
+calcRecFlags :: Bool -> ModDetails -> RoleAnnots -> [TyThing] -> RecTyInfo
 -- The 'boot_names' are the things declared in M.hi-boot, if M is the current module.
 -- Any type constructors in boot_names are automatically considered loop breakers
-calcRecFlags boot_details mrole_env tyclss
-  = RTI { rti_promotable = is_promotable
+calcRecFlags promote_ok boot_details mrole_env tyclss
+  = RTI { rti_promotable = promote_ok && is_promotable
         , rti_roles      = roles
         , rti_is_rec     = is_rec }
   where

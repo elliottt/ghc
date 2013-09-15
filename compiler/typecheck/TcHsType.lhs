@@ -1323,14 +1323,16 @@ tcTyClTyVars tycon (HsQTvs { hsq_kvs = hs_kvs, hsq_tvs = hs_tvs }) thing_inside
            ; return $ mkTyVar n kind }
 
 -----------------------------------
-tcDataKindSig :: Kind -> TcM [TyVar]
+tcDataKindSig :: Bool -> Kind -> TcM [TyVar]
 -- GADT decls can have a (perhaps partial) kind signature
 --	e.g.  data T :: * -> * -> * where ...
 -- This function makes up suitable (kinded) type variables for 
 -- the argument kinds, and checks that the result kind is indeed *.
 -- We use it also to make up argument type variables for for data instances.
-tcDataKindSig kind
-  = do	{ checkTc (isLiftedTypeKind res_kind) (badKindSig kind)
+tcDataKindSig isType kind
+  = do	{ let expected | isType    = isLiftedTypeKind
+                       | otherwise = isSuperKind
+        ; checkTc (expected res_kind) (badKindSig isType kind)
 	; span <- getSrcSpanM
 	; us   <- newUniqueSupply 
 	; let uniqs = uniqsFromSupply us
@@ -1348,10 +1350,13 @@ tcDataKindSig kind
     names :: [String]
     names = [ c:cs | cs <- "" : names, c <- ['a'..'z'] ] 
 
-badKindSig :: Kind -> SDoc
-badKindSig kind 
- = hang (ptext (sLit "Kind signature on data type declaration has non-* return kind"))
+badKindSig :: Bool -> Kind -> SDoc
+badKindSig isType kind 
+ = hang (ptext (sLit ("Kind signature on data type declaration has non-" ++ skind ++ " return kind")))
 	2 (ppr kind)
+ where
+ skind | isType    = "*"
+       | otherwise = "BOX"
 \end{code}
 
 Note [Avoid name clashes for associated data types]

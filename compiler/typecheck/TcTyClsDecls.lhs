@@ -128,10 +128,15 @@ tcTyClGroup boot_details tyclds
        ; traceTc "tcTyAndCl generalized kinds" (ppr names_w_poly_kinds)
             -- the checkNoErrs is necessary to fix #7175.
 
+            -- one `data type` declaration in a group will disable promotion for
+            -- the whole group
+       ; let promote_ok = all (\ d -> not (isTypeOnlyDecl (unLoc d))
+                                   && not (isKindDecl     (unLoc d))) tyclds
+
             -- Step 2: type-check all groups together, returning
             -- the final TyCons and Classes
        ; tyclss <- fixM $ \ rec_tyclss -> do
-           { let rec_flags = calcRecFlags boot_details role_annots rec_tyclss
+           { let rec_flags = calcRecFlags promote_ok boot_details role_annots rec_tyclss
 
                  -- Populate environment with knot-tied ATyCon for TyCons
                  -- NB: if the decls mention any ill-staged data cons
@@ -387,12 +392,15 @@ getInitialKind decl@(ClassDecl { tcdLName = L _ name, tcdTyVars = ktvs, tcdATs =
 getInitialKind decl@(DataDecl { tcdLName = L _ name
                                 , tcdTyVars = ktvs
                                 , tcdDataDefn = HsDataDefn { dd_kindSig = m_sig
+                                                           , dd_try_promote = prom
                                                            , dd_cons = cons } })
-  = do { (decl_kind, num_extra_tvs, role_annots) <-
+  = do { let isType = KindOnly /= prom
+       ; (decl_kind, num_extra_tvs, role_annots) <-
            kcHsTyVarBndrs (kcStrategy decl) ktvs $
            do { res_k <- case m_sig of
-                           Just ksig -> tcLHsKind ksig
-                           Nothing   -> return liftedTypeKind
+                           Just ksig           -> tcLHsKind ksig
+                           Nothing | isType    -> return liftedTypeKind
+                                   | otherwise -> return (mkArrowKinds (map (const superKind) (hsq_kvs ktvs)) superKind)
                  -- return the number of extra type arguments from the res_k so
                  -- we can extend the role_annots list
               ; return (res_k, length $ fst $ splitKindFunTys res_k) }
@@ -752,7 +760,7 @@ tcFamDecl1 parent
   { traceTc "data family:" (ppr tc_name)
   ; checkFamFlag tc_name
   ; checkNoRoles tvs
-  ; extra_tvs <- tcDataKindSig kind
+  ; extra_tvs <- tcDataKindSig True kind
   ; let final_tvs = tvs' ++ extra_tvs    -- we may not need these
         roles     = map (const Nominal) final_tvs
         tycon = buildAlgTyCon tc_name final_tvs roles Nothing []
@@ -782,9 +790,11 @@ tcDataDefn :: RecTyInfo -> Name
   -- NB: not used for newtype/data instances (whether associated or not)
 tcDataDefn rec_info tc_name tvs kind
          (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                     , dd_try_promote = prom
                      , dd_ctxt = ctxt, dd_kindSig = mb_ksig
                      , dd_cons = cons })
-  = do { extra_tvs <- tcDataKindSig kind
+  = do { let isType = KindOnly /= prom
+       ; extra_tvs <- tcDataKindSig isType kind
        ; let final_tvs  = tvs ++ extra_tvs
              roles      = rti_roles rec_info tc_name
        ; stupid_theta <- tcHsContext ctxt
@@ -803,7 +813,7 @@ tcDataDefn rec_info tc_name tvs kind
 
        ; tycon <- fixM $ \ tycon -> do
              { let res_ty = mkTyConApp tycon (mkTyVarTys final_tvs)
-             ; data_cons <- tcConDecls new_or_data tc_name tycon
+             ; data_cons <- tcConDecls isType new_or_data tc_name tycon
                                        (final_tvs, res_ty) cons
              ; tc_rhs <-
                  if null cons && is_boot              -- In a hs-boot file, empty cons means
@@ -812,7 +822,7 @@ tcDataDefn rec_info tc_name tvs kind
                    DataType -> return (mkDataTyConRhs data_cons)
                    NewType  -> ASSERT( not (null data_cons) )
                                     mkNewTyConRhs tc_name tycon (head data_cons)
-             ; return (buildAlgTyCon tc_name final_tvs roles cType stupid_theta tc_rhs
+             ; return (buildAlgTyConLevel isType tc_name final_tvs roles cType stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
                                      (rti_promotable rec_info)
                                      (not h98_syntax) NoParentTyCon) }
@@ -1122,12 +1132,13 @@ consUseH98Syntax _                                             = True
                  -- All constructors have same shape
 
 -----------------------------------
-tcConDecls :: NewOrData -> Name -> TyCon -> ([TyVar], Type)
+tcConDecls :: Bool -> NewOrData -> Name -> TyCon -> ([TyVar], Type)
            -> [LConDecl Name] -> TcM [DataCon]
-tcConDecls new_or_data tc_name rep_tycon (tmpl_tvs, res_tmpl) cons
-  = mapM (addLocM  $ tcConDecl new_or_data tc_name rep_tycon tmpl_tvs res_tmpl) cons
+tcConDecls isType new_or_data tc_name rep_tycon (tmpl_tvs, res_tmpl) cons
+  = mapM (addLocM  $ tcConDecl isType new_or_data tc_name rep_tycon tmpl_tvs res_tmpl) cons
 
-tcConDecl :: NewOrData
+tcConDecl :: Bool
+          -> NewOrData
           -> Name              -- of tycon
           -> TyCon             -- Representation tycon
           -> [TyVar] -> Type   -- Return type template (with its template tyvars)
@@ -1135,7 +1146,7 @@ tcConDecl :: NewOrData
           -> ConDecl Name
           -> TcM DataCon
 
-tcConDecl new_or_data tc_name rep_tycon tmpl_tvs res_tmpl        -- Data types
+tcConDecl isType new_or_data tc_name rep_tycon tmpl_tvs res_tmpl        -- Data types
           (ConDecl { con_name = name
                    , con_qvars = hs_tvs, con_cxt = hs_ctxt
                    , con_details = hs_details, con_res = hs_res_ty })
@@ -1144,7 +1155,11 @@ tcConDecl new_or_data tc_name rep_tycon tmpl_tvs res_tmpl        -- Data types
        ; (ctxt, arg_tys, res_ty, is_infix, field_lbls, stricts)
            <- tcHsTyVarBndrs hs_tvs $ \ _ ->
               do { ctxt    <- tcHsContext hs_ctxt
-                 ; details <- tcConArgs new_or_data hs_details
+                 ; let isH98 = case hs_res_ty of
+                                 ResTyH98 -> True
+                                 _        -> False
+                 ; ASSERT( isType || (null (unLoc hs_ctxt) && isH98) ) return ()
+                 ; details <- tcConArgs isType new_or_data hs_details
                  ; res_ty  <- tcConRes tc_name (unLoc name) hs_res_ty
                  ; let (is_infix, field_lbls, btys) = details
                        (arg_tys, stricts)           = unzip btys
@@ -1180,25 +1195,27 @@ tcConDecl new_or_data tc_name rep_tycon tmpl_tvs res_tmpl        -- Data types
                 --      that way checkValidDataCon can complain if it's wrong.
        }
 
-tcConArgs :: NewOrData -> HsConDeclDetails Name -> TcM (Bool, [Name], [(TcType, HsBang)])
-tcConArgs new_or_data (PrefixCon btys)
-  = do { btys' <- mapM (tcConArg new_or_data) btys
+tcConArgs :: Bool -> NewOrData -> HsConDeclDetails Name -> TcM (Bool, [Name], [(TcType, HsBang)])
+tcConArgs isType new_or_data (PrefixCon btys)
+  = do { btys' <- mapM (tcConArg isType new_or_data) btys
        ; return (False, [], btys') }
-tcConArgs new_or_data (InfixCon bty1 bty2)
-  = do { bty1' <- tcConArg new_or_data bty1
-       ; bty2' <- tcConArg new_or_data bty2
+tcConArgs isType new_or_data (InfixCon bty1 bty2)
+  = do { bty1' <- tcConArg isType new_or_data bty1
+       ; bty2' <- tcConArg isType new_or_data bty2
        ; return (True, [], [bty1', bty2']) }
-tcConArgs new_or_data (RecCon fields)
-  = do { btys' <- mapM (tcConArg new_or_data) btys
+tcConArgs isType new_or_data (RecCon fields)
+  = do { btys' <- mapM (tcConArg isType new_or_data) btys
        ; return (False, field_names, btys') }
   where
     field_names = map (unLoc . cd_fld_name) fields
     btys        = map cd_fld_type fields
 
-tcConArg :: NewOrData -> LHsType Name -> TcM (TcType, HsBang)
-tcConArg new_or_data bty
+tcConArg :: Bool -> NewOrData -> LHsType Name -> TcM (TcType, HsBang)
+tcConArg isType new_or_data bty
   = do  { traceTc "tcConArg 1" (ppr bty)
-        ; arg_ty <- tcHsConArgType new_or_data bty
+        ; arg_ty <- if isType
+                       then tcHsConArgType new_or_data bty
+                       else tcLHsKind bty
         ; traceTc "tcConArg 2" (ppr bty)
         ; return (arg_ty, getBangStrictness bty) }
 
