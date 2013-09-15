@@ -24,6 +24,8 @@ import RnNames
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcRnMonad
 
+import Util ( debugIsOn )
+
 import ForeignCall      ( CCallTarget(..) )
 import Module
 import HscTypes         ( Warnings(..), plusWarns )
@@ -44,6 +46,7 @@ import Digraph          ( SCC, flattenSCC, stronglyConnCompFromEdgedVertices )
 
 import Control.Monad
 import Data.List( partition )
+import Data.Maybe( isNothing )
 import Data.Traversable (traverse)
 import Maybes( orElse )
 \end{code}
@@ -914,10 +917,13 @@ rnTyClDecl (SynDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdRhs = rhs })
 
 -- "data", "newtype" declarations
 -- both top level and (for an associated type) in an instance decl
-rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdDataDefn = defn })
+rnTyClDecl dd@(DataDecl { tcdLName = tycon, tcdTyVars = tyvars0, tcdDataDefn = defn })
   = do { tycon' <- lookupLocatedTopBndrRn tycon
-       ; let kvs = extractDataDefnKindVars defn
-             doc = TyDataCtx tycon
+       ; let kvs0 = extractDataDefnKindVars defn
+             doc  = TyDataCtx tycon
+       ; ASSERT( not (isKindDecl dd) || null kvs0 ) return ()
+       ; let (kvs,tyvars) | isKindDecl dd = (kindParams tyvars0,mkHsQTvs [])
+                          | otherwise     = (kvs0,tyvars0)
        ; traceRn (text "rntycl-data" <+> ppr tycon <+> ppr kvs)
        ; ((tyvars', defn'), fvs) <- bindHsTyVars doc Nothing kvs tyvars $ \ tyvars' ->
                                     do { (defn', fvs) <- rnDataDefn doc defn
@@ -938,7 +944,7 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = lcls,
         ; ((tyvars', context', fds', ats', at_defs', sigs'), stuff_fvs)
             <- bindHsTyVars cls_doc Nothing kvs tyvars $ \ tyvars' -> do
                   -- Checks for distinct tyvars
-             { (context', cxt_fvs) <- rnContext cls_doc context
+             { (context', cxt_fvs) <- rnContext True cls_doc context
              ; fds'  <- rnFds (docOfHsDocContext cls_doc) fds
                          -- The fundeps have no free variables
              ; (ats',     fv_ats)     <- rnATDecls cls' ats
@@ -989,19 +995,31 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = lcls,
   where
     cls_doc  = ClassDeclCtx lcls
 
+kindParams :: LHsTyVarBndrs RdrName -> [RdrName]
+kindParams bndrs =
+  ASSERT( null (hsq_kvs bndrs) && all (isSimple . unLoc) (hsq_tvs bndrs) )
+  map (unpack . unLoc) (hsq_tvs bndrs)
+  where
+  isSimple (HsTyVarBndr _ Nothing Nothing) = True
+  isSimple _                               = False
+
+  unpack (HsTyVarBndr n _ _) = n
+
 -- "type" and "type instance" declarations
 rnTySyn :: HsDocContext -> LHsType RdrName -> RnM (LHsType Name, FreeVars)
 rnTySyn doc rhs = rnLHsType doc rhs
 
 rnDataDefn :: HsDocContext -> HsDataDefn RdrName -> RnM (HsDataDefn Name, FreeVars)
 rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                           , dd_try_promote = prom
                            , dd_ctxt = context, dd_cons = condecls 
                            , dd_kindSig = sig, dd_derivs = derivs })
-  = do  { checkTc (h98_style || null (unLoc context)) 
+  = ASSERT( isType || (isNothing sig && isNothing derivs) )
+    do  { checkTc (h98_style || null (unLoc context)) 
                   (badGadtStupidTheta doc)
 
         ; (sig', sig_fvs)  <- rnLHsMaybeKind doc sig
-        ; (context', fvs1) <- rnContext doc context
+        ; (context', fvs1) <- rnContext isType doc context
         ; (derivs',  fvs3) <- rn_derivs derivs
 
         -- For the constructor declarations, drop the LocalRdrEnv
@@ -1011,18 +1029,20 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
         ; let { zap_lcl_env | h98_style = \ thing -> thing
                             | otherwise = setLocalRdrEnv emptyLocalRdrEnv }
         ; (condecls', con_fvs) <- zap_lcl_env $
-                                  rnConDecls condecls
+                                  rnConDecls isType condecls
            -- No need to check for duplicate constructor decls
            -- since that is done by RnNames.extendGlobalRdrEnvRn
 
         ; let all_fvs = fvs1 `plusFV` fvs3 `plusFV`
                         con_fvs `plusFV` sig_fvs
         ; return ( HsDataDefn { dd_ND = new_or_data, dd_cType = cType
+                              , dd_try_promote = prom
                               , dd_ctxt = context', dd_kindSig = sig'
                               , dd_cons = condecls', dd_derivs = derivs' }
                  , all_fvs )
         }
   where
+    isType    = KindOnly /= prom
     h98_style = case condecls of         -- Note [Stupid theta]
                      L _ (ConDecl { con_res = ResTyGADT {} }) : _  -> False
                      _                                             -> True
@@ -1136,15 +1156,15 @@ badAssocRhs ns
                2 (ptext (sLit "All such variables must be bound on the LHS")))
 
 -----------------
-rnConDecls :: [LConDecl RdrName] -> RnM ([LConDecl Name], FreeVars)
-rnConDecls = mapFvRn (wrapLocFstM rnConDecl)
+rnConDecls :: Bool -> [LConDecl RdrName] -> RnM ([LConDecl Name], FreeVars)
+rnConDecls isType = mapFvRn (wrapLocFstM (rnConDecl isType))
 
-rnConDecl :: ConDecl RdrName -> RnM (ConDecl Name, FreeVars)
-rnConDecl decl@(ConDecl { con_name = name, con_qvars = tvs
+rnConDecl :: Bool -> ConDecl RdrName -> RnM (ConDecl Name, FreeVars)
+rnConDecl isType decl@(ConDecl { con_name = name, con_qvars = tvs
                         , con_cxt = lcxt@(L loc cxt), con_details = details
                         , con_res = res_ty, con_doc = mb_doc
                         , con_old_rec = old_rec, con_explicit = expl })
-  = do  { addLocM checkConName name
+  = do  { addLocM (checkConName isType) name
         ; when old_rec (addWarn (deprecRecSyntax decl))
         ; new_name <- lookupLocatedTopBndrRn name
 
@@ -1167,8 +1187,8 @@ rnConDecl decl@(ConDecl { con_name = name, con_qvars = tvs
         ; mb_doc' <- rnMbLHsDoc mb_doc
 
         ; bindHsTyVars doc Nothing free_kvs new_tvs $ \new_tyvars -> do
-        { (new_context, fvs1) <- rnContext doc lcxt
-        ; (new_details, fvs2) <- rnConDeclDetails doc details
+        { (new_context, fvs1) <- rnContext isType doc lcxt
+        ; (new_details, fvs2) <- rnConDeclDetails isType doc details
         ; (new_details', new_res_ty, fvs3) <- rnConResult doc (unLoc new_name) new_details res_ty
         ; return (decl { con_name = new_name, con_qvars = new_tyvars, con_cxt = new_context
                        , con_details = new_details', con_res = new_res_ty, con_doc = mb_doc' },
@@ -1208,20 +1228,22 @@ rnConResult doc con details (ResTyGADT ty)
                         | otherwise
                         -> return (PrefixCon arg_tys, ResTyGADT res_ty, fvs) }
 
-rnConDeclDetails :: HsDocContext
+rnConDeclDetails :: Bool
+                 -> HsDocContext
                  -> HsConDetails (LHsType RdrName) [ConDeclField RdrName]
                  -> RnM (HsConDetails (LHsType Name) [ConDeclField Name], FreeVars)
-rnConDeclDetails doc (PrefixCon tys)
-  = do { (new_tys, fvs) <- rnLHsTypes doc tys
+rnConDeclDetails isType doc (PrefixCon tys)
+  = do { (new_tys, fvs) <- rnLHsTysKis isType doc tys
        ; return (PrefixCon new_tys, fvs) }
 
-rnConDeclDetails doc (InfixCon ty1 ty2)
-  = do { (new_ty1, fvs1) <- rnLHsType doc ty1
-       ; (new_ty2, fvs2) <- rnLHsType doc ty2
+rnConDeclDetails isType doc (InfixCon ty1 ty2)
+  = do { (new_ty1, fvs1) <- rnLHsTyKi isType doc ty1
+       ; (new_ty2, fvs2) <- rnLHsTyKi isType doc ty2
        ; return (InfixCon new_ty1 new_ty2, fvs1 `plusFV` fvs2) }
 
-rnConDeclDetails doc (RecCon fields)
-  = do  { (new_fields, fvs) <- rnConDeclFields doc fields
+
+rnConDeclDetails isType doc (RecCon fields)
+  = do  { (new_fields, fvs) <- rnConDeclFields isType doc fields
                 -- No need to check for duplicate fields
                 -- since that is done by RnNames.extendGlobalRdrEnvRn
         ; return (RecCon new_fields, fvs) }
@@ -1247,12 +1269,18 @@ badRecResTy doc = ptext (sLit "Malformed constructor signature") $$ doc
 --      data T = :% Int Int
 -- from interface files, which always print in prefix form
 
-checkConName :: RdrName -> TcRn ()
-checkConName name = checkErr (isRdrDataCon name) (badDataCon name)
+checkConName :: Bool -> RdrName -> TcRn ()
+checkConName isType name
+  | isType    = checkErr (isRdrDataCon name) (badDataCon name)
+  | otherwise = checkErr (isRdrTc      name) (badTypeCon name)
 
 badDataCon :: RdrName -> SDoc
 badDataCon name
    = hsep [ptext (sLit "Illegal data constructor name"), quotes (ppr name)]
+
+badTypeCon :: RdrName -> SDoc
+badTypeCon name
+   = hsep [ptext (sLit "Illegal type constructor name"), quotes (ppr name)]
 \end{code}
 
 Note [Infix GADT constructors]

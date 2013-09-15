@@ -11,6 +11,8 @@ module RnTypes (
         rnHsSigType, rnLHsInstType, rnConDeclFields,
         newTyVarNameRn,
 
+        rnLHsTyKi, rnLHsTysKis,
+
         -- Precence related stuff
         mkOpAppRn, mkNegAppRn, mkOpFormRn, mkConOpPatRn,
         checkPrecMatch, checkSectionPrec, warnUnusedForAlls,
@@ -137,7 +139,7 @@ rnHsTyKi isType doc (HsForAllTy Implicit _ lctxt@(L _ ctxt) ty)
            --   class C a where { op :: a -> a }
         tyvar_bndrs = userHsTyVarBndrs loc forall_tvs
 
-    rnForAll doc Implicit forall_kvs (mkHsQTvs tyvar_bndrs) lctxt ty
+    rnForAll isType doc Implicit forall_kvs (mkHsQTvs tyvar_bndrs) lctxt ty
 
 rnHsTyKi isType doc ty@(HsForAllTy Explicit forall_tyvars lctxt@(L _ ctxt) tau)
   = ASSERT( isType ) do {      -- Explicit quantification.
@@ -147,7 +149,7 @@ rnHsTyKi isType doc ty@(HsForAllTy Explicit forall_tyvars lctxt@(L _ ctxt) tau)
              in_type_doc = ptext (sLit "In the type") <+> quotes (ppr ty)
        ; warnUnusedForAlls (in_type_doc $$ docOfHsDocContext doc) forall_tyvars mentioned
 
-       ; rnForAll doc Explicit kvs forall_tyvars lctxt tau }
+       ; rnForAll isType doc Explicit kvs forall_tyvars lctxt tau }
 
 rnHsTyKi isType _ (HsTyVar rdr_name)
   = do { name <- rnTyVar isType rdr_name
@@ -180,10 +182,10 @@ rnHsTyKi isType doc (HsBangTy b ty)
     do { (ty', fvs) <- rnLHsType doc ty
        ; return (HsBangTy b ty', fvs) }
 
-rnHsTyKi _ doc ty@(HsRecTy flds)
+rnHsTyKi isType doc ty@(HsRecTy flds)
   = do { addErr (hang (ptext (sLit "Record syntax is illegal here:"))
                     2 (ppr ty))
-       ; (flds', fvs) <- rnConDeclFields doc flds
+       ; (flds', fvs) <- rnConDeclFields isType doc flds
        ; return (HsRecTy flds', fvs) }
 
 rnHsTyKi isType doc (HsFunTy ty1 ty2)
@@ -308,19 +310,25 @@ rnTyVar is_type rdr_name
 rnLHsTypes :: HsDocContext -> [LHsType RdrName]
            -> RnM ([LHsType Name], FreeVars)
 rnLHsTypes doc tys = mapFvRn (rnLHsType doc) tys
+
+
+rnLHsTysKis :: Bool -> HsDocContext -> [LHsType RdrName]
+            -> RnM ([LHsType Name], FreeVars)
+rnLHsTysKis isType doc tys = mapFvRn (rnLHsTyKi isType doc) tys
+
 \end{code}
 
 
 \begin{code}
-rnForAll :: HsDocContext -> HsExplicitFlag
+rnForAll :: Bool -> HsDocContext -> HsExplicitFlag
          -> [RdrName]                -- Kind variables
          -> LHsTyVarBndrs RdrName   -- Type variables
          -> LHsContext RdrName -> LHsType RdrName
          -> RnM (HsType Name, FreeVars)
 
-rnForAll doc exp kvs forall_tyvars ctxt ty
+rnForAll isType doc exp kvs forall_tyvars ctxt ty
   | null kvs, null (hsQTvBndrs forall_tyvars), null (unLoc ctxt)
-  = rnHsType doc (unLoc ty)
+  = rnHsTyKi isType doc (unLoc ty)
         -- One reason for this case is that a type like Int#
         -- starts off as (HsForAllTy Nothing [] Int), in case
         -- there is some quantification.  Now that we have quantified
@@ -331,8 +339,8 @@ rnForAll doc exp kvs forall_tyvars ctxt ty
 
   | otherwise
   = bindHsTyVars doc Nothing kvs forall_tyvars $ \ new_tyvars ->
-    do { (new_ctxt, fvs1) <- rnContext doc ctxt
-       ; (new_ty, fvs2) <- rnLHsType doc ty
+    do { (new_ctxt, fvs1) <- rnContext isType doc ctxt
+       ; (new_ty, fvs2) <- rnLHsTyKi isType doc ty
        ; return (HsForAllTy exp new_tyvars new_ctxt new_ty, fvs1 `plusFV` fvs2) }
         -- Retain the same implicit/explicit flag as before
         -- so that we can later print it correctly
@@ -521,20 +529,20 @@ but it seems tiresome to do so.
 %*********************************************************
 
 \begin{code}
-rnConDeclFields :: HsDocContext -> [ConDeclField RdrName]
+rnConDeclFields :: Bool -> HsDocContext -> [ConDeclField RdrName]
                 -> RnM ([ConDeclField Name], FreeVars)
-rnConDeclFields doc fields = mapFvRn (rnField doc) fields
+rnConDeclFields isType doc fields = mapFvRn (rnField isType doc) fields
 
-rnField :: HsDocContext -> ConDeclField RdrName -> RnM (ConDeclField Name, FreeVars)
-rnField doc (ConDeclField name ty haddock_doc)
+rnField :: Bool -> HsDocContext -> ConDeclField RdrName -> RnM (ConDeclField Name, FreeVars)
+rnField isType doc (ConDeclField name ty haddock_doc)
   = do { new_name <- lookupLocatedTopBndrRn name
-       ; (new_ty, fvs) <- rnLHsType doc ty
+       ; (new_ty, fvs) <- rnLHsTyKi isType doc ty
        ; new_haddock_doc <- rnMbLHsDoc haddock_doc
        ; return (ConDeclField new_name new_ty new_haddock_doc, fvs) }
 
-rnContext :: HsDocContext -> LHsContext RdrName -> RnM (LHsContext Name, FreeVars)
-rnContext doc (L loc cxt)
-  = do { (cxt', fvs) <- rnLHsTypes doc cxt
+rnContext :: Bool -> HsDocContext -> LHsContext RdrName -> RnM (LHsContext Name, FreeVars)
+rnContext isType doc (L loc cxt)
+  = do { (cxt', fvs) <- rnLHsTysKis isType doc cxt
        ; return (L loc cxt', fvs) }
 \end{code}
 

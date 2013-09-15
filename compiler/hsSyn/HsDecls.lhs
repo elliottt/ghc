@@ -16,7 +16,7 @@ module HsDecls (
   HsDecl(..), LHsDecl, HsDataDefn(..),
   -- ** Class or type declarations
   TyClDecl(..), LTyClDecl, TyClGroup,
-  isClassDecl, isDataDecl, isSynDecl, tcdName,
+  isClassDecl, isDataDecl, isKindDecl, isSynDecl, tcdName,
   isFamilyDecl, isTypeFamilyDecl, isDataFamilyDecl,
   isOpenTypeFamilyInfo, isClosedTypeFamilyInfo,
   tyFamInstDeclName, tyFamInstDeclLName,
@@ -26,6 +26,7 @@ module HsDecls (
 
   -- ** Instance declarations
   InstDecl(..), LInstDecl, NewOrData(..), FamilyInfo(..),
+  HsPromotionInfo(..),
   TyFamInstDecl(..), LTyFamInstDecl, instDeclDataFamInsts,
   DataFamInstDecl(..), LDataFamInstDecl, pprDataFamInstFlavour,
   TyFamInstEqn(..), LTyFamInstEqn,
@@ -497,6 +498,10 @@ isDataDecl :: TyClDecl name -> Bool
 isDataDecl (DataDecl {}) = True
 isDataDecl _other        = False
 
+isKindDecl :: TyClDecl name -> Bool
+isKindDecl (DataDecl { tcdDataDefn = HsDataDefn { dd_try_promote = KindOnly }}) = True
+isKindDecl _                                                                    = False
+
 -- | type or type instance declaration
 isSynDecl :: TyClDecl name -> Bool
 isSynDecl (SynDecl {})   = True
@@ -682,6 +687,10 @@ data HsDataDefn name   -- The payload of a data type defn
     HsDataDefn { dd_ND     :: NewOrData,
                  dd_ctxt   :: LHsContext name,           -- ^ Context
                  dd_cType  :: Maybe CType,
+                 dd_try_promote :: HsPromotionInfo,
+                 -- ^ This boolean determines whether we should try to promote
+                 -- the type.  Even if it's True, the type may still not be
+                 -- promotable.
                  dd_kindSig:: Maybe (LHsKind name),
                      -- ^ Optional kind signature.
                      --
@@ -715,6 +724,13 @@ data NewOrData
   = NewType                     -- ^ @newtype Blah ...@
   | DataType                    -- ^ @data Blah ...@
   deriving( Eq, Data, Typeable )                -- Needed because Demand derives Eq
+
+-- | How promotion should operate for an AlgTyCon.
+data HsPromotionInfo
+  = TypeOnly    -- ^ Promotion is explicitly disabled by 'data type' syntax
+  | TypeAndKind -- ^ Promotion is possible, use this con
+  | KindOnly    -- ^ Only defines the promoted version
+    deriving (Eq, Data, Typeable)
 
 type LConDecl name = Located (ConDecl name)
 

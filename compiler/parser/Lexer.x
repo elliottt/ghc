@@ -478,6 +478,7 @@ data Token
   | ITgroup
   | ITby
   | ITusing
+  | ITkind
   | ITnominal
   | ITrepresentational
   | ITphantom
@@ -656,6 +657,7 @@ reservedWordsFM = listToUFM $
          ( "group",          ITgroup,         bit transformComprehensionsBit),
          ( "by",             ITby,            bit transformComprehensionsBit),
          ( "using",          ITusing,         bit transformComprehensionsBit),
+         ( "kind",           ITkind,          bit typeLiteralsBit),
 
          ( "foreign",        ITforeign,       bit ffiBit),
          ( "export",         ITexport,        bit ffiBit),
