@@ -20,7 +20,7 @@ module DataCon (
 	-- ** Type construction
 	mkDataCon, fIRST_TAG,
         buildAlgTyCon, 
-        buildAlgTyConLevel,
+        buildAlgTyConFlavor,
 	
 	-- ** Type deconstruction
 	dataConRepType, dataConSig, dataConFullSig,
@@ -658,8 +658,9 @@ mkDataCon name declared_infix
           -- are, so the promoteType for prom_kind should succeed
       = Just (mkPromotedDataCon con name (getUnique name) prom_kind roles)
       | otherwise 
-      = Nothing          
-    prom_kind = promoteType (dataConUserType con)
+      = Nothing
+    prom_kind | KindOnly <- promotableTyConFlavor rep_tycon = dataConUserType con
+              | otherwise               = promoteType (dataConUserType con)
     roles = map (const Nominal)          (univ_tvs ++ ex_tvs) ++
             map (const Representational) orig_arg_tys
 
@@ -1012,10 +1013,15 @@ buildAlgTyCon :: Name
 	      -> Bool		       -- ^ True <=> was declared in GADT syntax
               -> TyConParent
 	      -> TyCon
+buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs 
+              is_rec is_promotable gadt_syn parent =
+  buildAlgTyConFlavor prom_info tc_name ktvs roles cType stupid_theta rhs 
+              is_rec is_promotable gadt_syn parent
+  where
+  prom_info | is_promotable = Promotable ()
+            | otherwise     = NotPromotable
 
-buildAlgTyCon = buildAlgTyConLevel True
-
-buildAlgTyConLevel :: Bool
+buildAlgTyConFlavor :: PromotionInfo () -- ^ The original (parsed) PromotionInfo
               -> Name 
               -> [TyVar]               -- ^ Kind variables and type variables
               -> [Role]
@@ -1023,27 +1029,30 @@ buildAlgTyConLevel :: Bool
 	      -> ThetaType	       -- ^ Stupid theta
 	      -> AlgTyConRhs
 	      -> RecFlag
-	      -> Bool		       -- ^ True <=> this TyCon is promotable
+              -> Bool		       -- ^ True <=> this TyCon is promotable
 	      -> Bool		       -- ^ True <=> was declared in GADT syntax
               -> TyConParent
 	      -> TyCon
 
-buildAlgTyConLevel isType tc_name ktvs roles cType stupid_theta rhs 
+buildAlgTyConFlavor prom_info tc_name ktvs roles cType stupid_theta rhs 
               is_rec is_promotable gadt_syn parent
   = tc
   where 
-    kind | isType    = mkPiKinds ktvs liftedTypeKind
-         | otherwise = mkArrowKinds (map tyVarKind ktvs) superKind
+    kind = case prom_info of
+      KindOnly -> mkArrowKinds (map tyVarKind ktvs) superKind
+      _        -> mkPiKinds ktvs liftedTypeKind
 
     -- tc and mb_promoted_tc are mutually recursive
     tc = mkAlgTyCon tc_name kind ktvs roles cType stupid_theta 
                     rhs parent is_rec gadt_syn 
                     mb_promoted_tc
 
-    mb_promoted_tc
-      | is_promotable = Just (mkPromotedTyCon tc (promoteKind kind))
-      | not isType    = Just tc -- note, this is an infinite cycle
-      | otherwise     = Nothing
+    mb_promoted_tc = case prom_info of
+      Promotable () | is_promotable -> Promotable (mkPromotedTyCon tc (promoteKind kind))
+                      | otherwise   -> NotPromotable
+      TypeOnly                      -> TypeOnly
+      KindOnly                      -> KindOnly
+      NotPromotable                 -> NotPromotable -- shouldn't happen
 \end{code}
 
 

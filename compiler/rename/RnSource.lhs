@@ -24,7 +24,8 @@ import RnNames
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcRnMonad
 
-import Util ( debugIsOn )
+import Util             ( debugIsOn )
+import Type             ( PromotionInfo(..) )
 
 import ForeignCall      ( CCallTarget(..) )
 import Module

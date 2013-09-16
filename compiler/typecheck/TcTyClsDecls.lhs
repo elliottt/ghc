@@ -488,16 +488,18 @@ kcTyClDecl :: TyClDecl Name -> TcM ()
 --    result kind signature have aready been dealt with
 --    by getInitialKind, so we can ignore them here.
 
-kcTyClDecl (DataDecl { tcdLName = L _ name, tcdTyVars = hs_tvs, tcdDataDefn = defn })
+kcTyClDecl decl@(DataDecl { tcdLName = L _ name, tcdTyVars = hs_tvs, tcdDataDefn = defn })
   | HsDataDefn { dd_cons = cons, dd_kindSig = Just _ } <- defn
-  = mapM_ (wrapLocM (kcConDecl name)) cons
+  = mapM_ (wrapLocM (kcConDecl isType name)) cons
     -- hs_tvs and td_kindSig already dealt with in getInitialKind
     -- Ignore the dd_ctxt; heavily deprecated and inconvenient
 
   | HsDataDefn { dd_ctxt = ctxt, dd_cons = cons } <- defn
   = kcTyClTyVars name hs_tvs $
     do  { _ <- tcHsContext ctxt
-        ; mapM_ (wrapLocM (kcConDecl name)) cons }
+        ; mapM_ (wrapLocM (kcConDecl isType name)) cons }
+ where
+  isType = not (isKindDecl decl)
 
 kcTyClDecl decl@(SynDecl {}) = pprPanic "kcTyClDecl" (ppr decl)
 
@@ -522,17 +524,24 @@ kcTyClDecl (FamDecl (FamilyDecl { fdLName = L _ fam_tc_name
 kcTyClDecl (FamDecl {})    = return ()
 
 -------------------
-kcConDecl :: Name -> ConDecl Name -> TcM ()
-kcConDecl tc_name (ConDecl { con_name = name, con_qvars = ex_tvs
+kcConDecl :: Bool -> Name -> ConDecl Name -> TcM ()
+kcConDecl isType tc_name (ConDecl { con_name = name, con_qvars = ex_tvs
                            , con_cxt = ex_ctxt, con_details = details
                            , con_res = res })
   = addErrCtxt (dataConCtxt name) $
+    ASSERT( isType || (null (unLoc ex_ctxt) && isH98) )
     do { _ <- kcHsTyVarBndrs ParametricKinds ex_tvs $
               do { _ <- tcHsContext ex_ctxt
-                 ; mapM_ (tcHsOpenType . getBangType) (hsConDeclArgTys details)
+                 ; let check | isType    = tcHsOpenType
+                             | otherwise = tcHsKind
+                 ; mapM_ (check . getBangType) (hsConDeclArgTys details)
                  ; _ <- tcConRes tc_name (unLoc name) res
                  ; return (panic "kcConDecl", ()) }
        ; return () }
+  where
+  isH98 = case res of
+            ResTyH98 -> True
+            _        -> False
 \end{code}
 
 Note [Recursion and promoting data constructors]
@@ -822,7 +831,8 @@ tcDataDefn rec_info tc_name tvs kind
                    DataType -> return (mkDataTyConRhs data_cons)
                    NewType  -> ASSERT( not (null data_cons) )
                                     mkNewTyConRhs tc_name tycon (head data_cons)
-             ; return (buildAlgTyConLevel isType tc_name final_tvs roles cType stupid_theta tc_rhs
+
+             ; return (buildAlgTyConFlavor prom tc_name final_tvs roles cType stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
                                      (rti_promotable rec_info)
                                      (not h98_syntax) NoParentTyCon) }
@@ -934,7 +944,7 @@ kcDataDefn :: Name -> HsDataDefn Name -> TcKind -> TcM ()
 kcDataDefn tc_name
            (HsDataDefn { dd_ctxt = ctxt, dd_cons = cons, dd_kindSig = mb_kind }) res_k
   = do  { _ <- tcHsContext ctxt
-        ; mapM_ (wrapLocM (kcConDecl tc_name)) cons
+        ; mapM_ (wrapLocM (kcConDecl True tc_name)) cons
         ; kcResultKind mb_kind res_k }
 
 ------------------
@@ -1632,7 +1642,7 @@ checkValidDataCon dflags existential_ok tc con
         ; checkValidMonoType (dataConOrigResTy con)
                 -- Disallow MkT :: T (forall a. a->a)
                 -- Reason: it's really the argument of an equality constraint
-        ; checkValidType ctxt (dataConUserType con)
+        ; check_at_level ctxt (dataConUserType con)
         ; when (isNewTyCon tc) (checkNewDataCon con)
 
         ; mapM_ check_bang (zip3 (dataConStrictMarks con) (dataConRepBangs con) [1..])
@@ -1659,6 +1669,10 @@ checkValidDataCon dflags existential_ok tc con
 
     check_bang _
       = return ()
+
+    check_at_level = case promotableTyConFlavor tc of
+      KindOnly -> \ _ _ -> return ()
+      _        -> checkValidType
 
     bad_bang n herald
       = hang herald 2 (ptext (sLit "on the") <+> speakNth n

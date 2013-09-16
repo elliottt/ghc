@@ -27,7 +27,6 @@ module HsDecls (
 
   -- ** Instance declarations
   InstDecl(..), LInstDecl, NewOrData(..), FamilyInfo(..),
-  HsPromotionInfo(..),
   TyFamInstDecl(..), LTyFamInstDecl, instDeclDataFamInsts,
   DataFamInstDecl(..), LDataFamInstDecl, pprDataFamInstFlavour,
   TyFamInstEqn(..), LTyFamInstEqn,
@@ -692,7 +691,7 @@ data HsDataDefn name   -- The payload of a data type defn
     HsDataDefn { dd_ND     :: NewOrData,
                  dd_ctxt   :: LHsContext name,           -- ^ Context
                  dd_cType  :: Maybe CType,
-                 dd_try_promote :: HsPromotionInfo,
+                 dd_try_promote :: PromotionInfo (),
                  -- ^ This boolean determines whether we should try to promote
                  -- the type.  Even if it's True, the type may still not be
                  -- promotable.
@@ -729,13 +728,6 @@ data NewOrData
   = NewType                     -- ^ @newtype Blah ...@
   | DataType                    -- ^ @data Blah ...@
   deriving( Eq, Data, Typeable )                -- Needed because Demand derives Eq
-
--- | How promotion should operate for an AlgTyCon.
-data HsPromotionInfo
-  = TypeOnly    -- ^ Promotion is explicitly disabled by 'data type' syntax
-  | TypeAndKind -- ^ Promotion is possible, use this con
-  | KindOnly    -- ^ Only defines the promoted version
-    deriving (Eq, Data, Typeable)
 
 type LConDecl name = Located (ConDecl name)
 

@@ -33,6 +33,8 @@ module Type (
         tyConAppTyCon_maybe, tyConAppArgs_maybe, tyConAppTyCon, tyConAppArgs,
         splitTyConApp_maybe, splitTyConApp, tyConAppArgN,
 
+        PromotionInfo(..),
+
         mkForAllTy, mkForAllTys, splitForAllTy_maybe, splitForAllTys,
         mkPiKinds, mkPiType, mkPiTypes,
         applyTy, applyTys, applyTysD, isForAllTy, dropForAlls,

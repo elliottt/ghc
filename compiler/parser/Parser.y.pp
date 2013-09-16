@@ -43,6 +43,8 @@ import DynFlags
 import OrdList
 import HaddockUtils
 
+import TyCon            ( PromotionInfo(..) )
+
 import FastString
 import Maybes           ( orElse )
 import Outputable
@@ -657,9 +659,9 @@ ty_decl :: { LTyClDecl RdrName }
                 {% do { L loc decl <- mkFamDecl (comb3 $1 $2 $4) DataFamily $3 (unLoc $4)
                       ; return (L loc (FamDecl decl)) } }
 
-promotable :: { HsPromotionInfo }
-        : 'type'      { TypeOnly    } -- not promotable
-        |             { TypeAndKind } -- promotable
+promotable :: { PromotionInfo () }
+        : 'type'      { TypeOnly      } -- not promotable
+        |             { Promotable () } -- promotable
 
 inst_decl :: { LInstDecl RdrName }
         : 'instance' inst_type where_inst

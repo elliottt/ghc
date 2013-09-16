@@ -375,9 +375,9 @@ mk_tuple sort arity = (tycon, tuple_con)
   where
         tycon   = mkTupleTyCon tc_name tc_kind arity tyvars tuple_con sort prom_tc
         prom_tc = case sort of
-          BoxedTuple      -> Just (mkPromotedTyCon tycon (promoteKind tc_kind))
-          UnboxedTuple    -> Nothing
-          ConstraintTuple -> Nothing
+          BoxedTuple      -> Promotable (mkPromotedTyCon tycon (promoteKind tc_kind))
+          UnboxedTuple    -> NotPromotable
+          ConstraintTuple -> NotPromotable
 
         modu    = mkTupleModule sort arity
         tc_name = mkWiredInName modu (mkTupleOcc tcName sort arity) tc_uniq
@@ -445,7 +445,7 @@ eqTyCon = mkAlgTyCon eqTyConName
             NoParentTyCon
             NonRecursive
             False
-            Nothing   -- No parent for constraint-kinded types
+            NotPromotable   -- No parent for constraint-kinded types
   where
     kv = kKiVar
     k = mkTyVarTy kv

@@ -28,6 +28,10 @@ module TyCon(
         mkPromotedDataCon,
         mkPromotedTyCon,
 
+        PromotionFlavor,
+        PromotionInfo(..),
+        promotableTyConFlavor,
+
         -- ** Predicates on TyCons
         isAlgTyCon,
         isClassTyCon, isFamInstTyCon,
@@ -114,6 +118,7 @@ import Constants
 import Util
 import qualified Data.Data as Data
 import Data.Typeable (Typeable)
+import Data.Data (Data)
 \end{code}
 
 -----------------------------------------------
@@ -378,7 +383,7 @@ data TyCon
                                         -- or family instances, respectively.
                                         -- See also 'synTcParent'
         
-        tcPromoted :: Maybe TyCon    -- ^ Promoted TyCon, if any
+        tcPromoted :: PromotionFlavor -- ^ Promoted TyCon, if any
     }
 
   -- | Represents the infinite family of tuple type constructors,
@@ -391,7 +396,7 @@ data TyCon
         tyConTupleSort :: TupleSort,
         tyConTyVars    :: [TyVar],
         dataCon        :: DataCon, -- ^ Corresponding tuple data constructor
-        tcPromoted     :: Maybe TyCon    -- Nothing for unboxed tuples
+        tcPromoted     :: PromotionFlavor -- NotPromotable for unboxed tuples
     }
 
   -- | Represents type synonyms
@@ -458,6 +463,23 @@ data TyCon
 
 -- | Names of the fields in an algebraic record type
 type FieldLabel = Name
+
+type PromotionFlavor = PromotionInfo TyCon
+
+data PromotionInfo con
+  = NotPromotable  -- ^ Not promotable `data` declaration
+  | TypeOnly       -- ^ `data type` declaration
+  | KindOnly       -- ^ `data kind` declaration
+  | Promotable con -- ^ Promoted constructor
+    deriving (Eq, Data, Typeable)
+
+instance Functor PromotionInfo where
+  fmap f info = case info of
+    NotPromotable  -> NotPromotable
+    TypeOnly       -> TypeOnly
+    KindOnly       -> KindOnly
+    Promotable con -> Promotable (f con)
+
 
 -- | Represents right-hand-sides of 'TyCon's for algebraic types
 data AlgTyConRhs
@@ -924,7 +946,7 @@ mkAlgTyCon :: Name
            -> TyConParent
            -> RecFlag           -- ^ Is the 'TyCon' recursive?
            -> Bool              -- ^ Was the 'TyCon' declared with GADT syntax?
-           -> Maybe TyCon       -- ^ Promoted version
+           -> PromotionFlavor   -- ^ Promoted version
            -> TyCon
 mkAlgTyCon name kind tyvars roles cType stupid rhs parent is_rec gadt_syn prom_tc
   = AlgTyCon {
@@ -948,7 +970,7 @@ mkClassTyCon :: Name -> Kind -> [TyVar] -> [Role] -> AlgTyConRhs -> Class -> Rec
 mkClassTyCon name kind tyvars roles rhs clas is_rec
   = mkAlgTyCon name kind tyvars roles Nothing [] rhs (ClassTyCon clas) 
                is_rec False 
-               Nothing    -- Class TyCons are not pormoted
+               NotPromotable -- Class TyCons are not pormoted
 
 mkTupleTyCon :: Name
              -> Kind    -- ^ Kind of the resulting 'TyCon'
@@ -956,7 +978,7 @@ mkTupleTyCon :: Name
              -> [TyVar] -- ^ 'TyVar's scoped over: see 'tyConTyVars'
              -> DataCon
              -> TupleSort    -- ^ Whether the tuple is boxed or unboxed
-             -> Maybe TyCon  -- ^ Promoted version
+             -> PromotionFlavor -- ^ Promoted version
              -> TyCon
 mkTupleTyCon name kind arity tyvars con sort prom_tc
   = TupleTyCon {
@@ -1315,10 +1337,16 @@ isRecursiveTyCon :: TyCon -> Bool
 isRecursiveTyCon (AlgTyCon {algTcRec = Recursive}) = True
 isRecursiveTyCon _                                 = False
 
+promotableTyConFlavor :: TyCon -> PromotionFlavor
+promotableTyConFlavor (AlgTyCon { tcPromoted = prom })   = prom
+promotableTyConFlavor (TupleTyCon { tcPromoted = prom }) = prom
+promotableTyConFlavor _                                  = NotPromotable
+
 promotableTyCon_maybe :: TyCon -> Maybe TyCon
-promotableTyCon_maybe (AlgTyCon { tcPromoted = prom })   = prom
-promotableTyCon_maybe (TupleTyCon { tcPromoted = prom }) = prom
-promotableTyCon_maybe _                                  = Nothing
+promotableTyCon_maybe tycon = case promotableTyConFlavor tycon of
+  Promotable kicon -> Just kicon
+  KindOnly         -> Just tycon
+  _                -> Nothing
 
 promoteTyCon :: TyCon -> TyCon
 promoteTyCon tc = case promotableTyCon_maybe tc of

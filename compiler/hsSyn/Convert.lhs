@@ -174,6 +174,7 @@ cvtDec (DataD ctxt tc tvs constrs derivs)
         ; cons' <- mapM cvtConstr constrs
         ; derivs' <- cvtDerivs derivs
         ; let defn = HsDataDefn { dd_ND = DataType, dd_cType = Nothing
+                                , dd_try_promote = Promotable ()
                                 , dd_ctxt = ctxt'
                                 , dd_kindSig = Nothing
                                 , dd_cons = cons', dd_derivs = derivs' }
@@ -185,6 +186,7 @@ cvtDec (NewtypeD ctxt tc tvs constr derivs)
         ; con' <- cvtConstr constr
         ; derivs' <- cvtDerivs derivs
         ; let defn = HsDataDefn { dd_ND = NewType, dd_cType = Nothing
+                                , dd_try_promote = Promotable ()
                                 , dd_ctxt = ctxt'
                                 , dd_kindSig = Nothing
                                 , dd_cons = [con'], dd_derivs = derivs' }
@@ -232,6 +234,7 @@ cvtDec (DataInstD ctxt tc tys constrs derivs)
        ; cons' <- mapM cvtConstr constrs
        ; derivs' <- cvtDerivs derivs
        ; let defn = HsDataDefn { dd_ND = DataType, dd_cType = Nothing
+                               , dd_try_promote = NotPromotable
                                , dd_ctxt = ctxt'
                                , dd_kindSig = Nothing
                                , dd_cons = cons', dd_derivs = derivs' }
@@ -245,6 +248,7 @@ cvtDec (NewtypeInstD ctxt tc tys constr derivs)
        ; con' <- cvtConstr constr
        ; derivs' <- cvtDerivs derivs
        ; let defn = HsDataDefn { dd_ND = NewType, dd_cType = Nothing
+                               , dd_try_promote = NotPromotable
                                , dd_ctxt = ctxt'
                                , dd_kindSig = Nothing
                                , dd_cons = [con'], dd_derivs = derivs' }

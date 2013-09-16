@@ -80,6 +80,8 @@ import FastString
 import Maybes
 import Util
 
+import TyCon            ( PromotionInfo(..) )
+
 import Control.Applicative ((<$>))
 import Control.Monad
 import Text.ParserCombinators.ReadP as ReadP
@@ -124,7 +126,7 @@ mkClassDecl loc (L _ (mcxt, tycl_hdr)) fds where_cls
 
 mkTyData :: SrcSpan
          -> NewOrData
-         -> HsPromotionInfo
+         -> PromotionInfo ()
          -> Maybe CType
          -> Located (Maybe (LHsContext RdrName), LHsType RdrName)
          -> Maybe (LHsKind RdrName)
@@ -137,7 +139,7 @@ mkTyData loc new_or_data promotable cType (L _ (mcxt, tycl_hdr)) ksig data_cons 
 
          -- `data type` and `data kind` declarations only work when DataKinds
          -- is enabled.
-       ; unless (TypeAndKind == promotable) $ do
+       ; unless (Promotable () == promotable) $ do
            pstate  <- getPState
            let enabled = xopt Opt_DataKinds (dflags pstate)
            unless enabled (parseErrorSDoc loc (text "Illegal `data type` declaration (use -XDataKinds to enable)"))
@@ -172,7 +174,7 @@ mkFamInstData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_
                                         , dfid_defn = defn, dfid_fvs = placeHolderNames })) }
 
 mkDataDefn :: NewOrData
-           -> HsPromotionInfo
+           -> PromotionInfo ()
            -> Maybe CType
            -> Maybe (LHsContext RdrName)
            -> Maybe (LHsKind RdrName)

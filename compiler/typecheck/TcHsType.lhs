@@ -27,6 +27,7 @@ module TcHsType (
 	KindCheckingStrategy(..), kcStrategy, kcStrategyFamDecl,
         kcHsTyVarBndrs, tcHsTyVarBndrs, 
         tcHsLiftedType, tcHsOpenType,
+        tcHsKind,
 	tcLHsType, tcCheckLHsType, 
         tcHsContext, tcInferApps, tcHsArgTys,
 
@@ -283,11 +284,12 @@ tc_hs_arg_tys what tys kinds
              | (ty,kind,n) <- zip3 tys kinds [1..] ]
 
 ---------------------------
-tcHsOpenType, tcHsLiftedType :: LHsType Name -> TcM TcType
+tcHsOpenType, tcHsLiftedType, tcHsKind :: LHsType Name -> TcM TcType
 -- Used for type signatures
 -- Do not do validity checking
 tcHsOpenType ty   = addTypeCtxt ty $ tc_lhs_type ty ekOpen
 tcHsLiftedType ty = addTypeCtxt ty $ tc_lhs_type ty ekLifted
+tcHsKind k        = addTypeCtxt k  $ tc_lhs_kind k
 
 -- Like tcHsType, but takes an expected kind
 tcCheckLHsType :: LHsType Name -> Kind -> TcM Type
