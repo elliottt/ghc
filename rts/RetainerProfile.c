@@ -30,6 +30,7 @@
 #include "Stats.h"
 #include "ProfHeap.h"
 #include "Apply.h"
+#include "Stable.h" /* markStableTables */
 #include "sm/Storage.h" // for END_OF_STATIC_LIST
 
 /*
@@ -525,6 +526,18 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case MUT_ARR_PTRS_FROZEN0:
 	init_ptrs(&se.info, ((StgMutArrPtrs *)c)->ptrs,
 		  (StgPtr)(((StgMutArrPtrs *)c)->payload));
+	*first_child = find_ptrs(&se.info);
+	if (*first_child == NULL)
+	    return;
+	break;
+
+	// StgMutArrPtr.ptrs, no SRT
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN:
+    case SMALL_MUT_ARR_PTRS_FROZEN0:
+	init_ptrs(&se.info, ((StgSmallMutArrPtrs *)c)->ptrs,
+		  (StgPtr)(((StgSmallMutArrPtrs *)c)->payload));
 	*first_child = find_ptrs(&se.info);
 	if (*first_child == NULL)
 	    return;
@@ -1789,7 +1802,7 @@ computeRetainerSet( void )
 	// because we can find MUT_VAR objects which have not been
 	// visited during retainer profiling.
         for (n = 0; n < n_capabilities; n++) {
-          for (bd = capabilities[n].mut_lists[g]; bd != NULL; bd = bd->link) {
+          for (bd = capabilities[n]->mut_lists[g]; bd != NULL; bd = bd->link) {
 	    for (ml = bd->start; ml < bd->free; ml++) {
 
 		maybeInitRetainerSet((StgClosure *)*ml);

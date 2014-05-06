@@ -10,7 +10,7 @@ Type subsumption and unification
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module TcUnify (
@@ -131,7 +131,7 @@ matchExpectedFunTys herald arity orig_ty
     -- then   co : ty ~ t1 -> .. -> tn -> ty_r
 
     go n_req ty
-      | n_req == 0 = return (mkTcReflCo ty, [], ty)
+      | n_req == 0 = return (mkTcNomReflCo ty, [], ty)
 
     go n_req ty
       | Just ty' <- tcView ty = go n_req ty'
@@ -139,7 +139,7 @@ matchExpectedFunTys herald arity orig_ty
     go n_req (FunTy arg_ty res_ty)
       | not (isPredTy arg_ty)
       = do { (co, tys, ty_r) <- go (n_req-1) res_ty
-           ; return (mkTcFunCo (mkTcReflCo arg_ty) co, arg_ty:tys, ty_r) }
+           ; return (mkTcFunCo Nominal (mkTcNomReflCo arg_ty) co, arg_ty:tys, ty_r) }
 
     go n_req ty@(TyVarTy tv)
       | ASSERT( isTcTyVar tv) isMetaTyVar tv
@@ -222,7 +222,7 @@ matchExpectedTyConApp tc orig_ty
 
     go ty@(TyConApp tycon args) 
        | tc == tycon  -- Common case
-       = return (mkTcReflCo ty, args)
+       = return (mkTcNomReflCo ty, args)
 
     go (TyVarTy tv)
        | ASSERT( isTcTyVar tv) isMetaTyVar tv
@@ -267,7 +267,7 @@ matchExpectedAppTy orig_ty
       | Just ty' <- tcView ty = go ty'
 
       | Just (fun_ty, arg_ty) <- tcSplitAppTy_maybe ty
-      = return (mkTcReflCo orig_ty, (fun_ty, arg_ty))
+      = return (mkTcNomReflCo orig_ty, (fun_ty, arg_ty))
 
     go (TyVarTy tv)
       | ASSERT( isTcTyVar tv) isMetaTyVar tv
@@ -440,17 +440,15 @@ newImplication :: SkolemInfo -> [TcTyVar]
 newImplication skol_info skol_tvs given thing_inside
   = ASSERT2( all isTcTyVar skol_tvs, ppr skol_tvs )
     ASSERT2( all isSkolemTyVar skol_tvs, ppr skol_tvs )
-    do { let no_equalities = not (hasEqualities given)
-       ; ((result, untch), wanted) <- captureConstraints  $ 
+    do { ((result, untch), wanted) <- captureConstraints  $ 
                                       captureUntouchables $
                                       thing_inside
 
-       ; if isEmptyWC wanted && no_equalities
-       	    -- Optimisation : if there are no wanteds, and the givens
-       	    -- are sufficiently simple, don't generate an implication
-       	    -- at all.  Reason for the hasEqualities test:
-	    -- we don't want to lose the "inaccessible alternative"
-	    -- error check
+       ; if isEmptyWC wanted && null given
+       	    -- Optimisation : if there are no wanteds, and no givens
+       	    -- don't generate an implication at all.
+            -- Reason for the (null given): we don't want to lose 
+            -- the "inaccessible alternative" error check
          then 
             return (emptyTcEvBinds, result)
          else do
@@ -459,6 +457,7 @@ newImplication skol_info skol_tvs given thing_inside
        ; emitImplication $ Implic { ic_untch = untch
              		     	  , ic_skols = skol_tvs
                                   , ic_fsks  = []
+                                  , ic_no_eqs = False
                              	  , ic_given = given
                                   , ic_wanted = wanted
                                   , ic_insol  = insolubleWC wanted
@@ -497,7 +496,7 @@ unifyTheta :: TcThetaType -> TcThetaType -> TcM [TcCoercion]
 unifyTheta theta1 theta2
   = do  { checkTc (equalLength theta1 theta2)
                   (vcat [ptext (sLit "Contexts differ in length"),
-                         nest 2 $ parens $ ptext (sLit "Use -XRelaxedPolyRec to allow this")])
+                         nest 2 $ parens $ ptext (sLit "Use RelaxedPolyRec to allow this")])
         ; zipWithM unifyPred theta1 theta2 }
 \end{code}
 
@@ -539,9 +538,10 @@ uType, uType_defer
 uType_defer origin ty1 ty2
   = do { eqv <- newEq ty1 ty2
        ; loc <- getCtLoc origin
-       ; let ctev = CtWanted { ctev_evar = eqv
-                             , ctev_pred = mkTcEqPred ty1 ty2 }
-       ; emitFlat $ mkNonCanonical loc ctev 
+       ; emitFlat $ mkNonCanonical $
+             CtWanted { ctev_evar = eqv
+                      , ctev_pred = mkTcEqPred ty1 ty2
+                      , ctev_loc = loc }
 
        -- Error trace only
        -- NB. do *not* call mkErrInfo unless tracing is on, because
@@ -603,7 +603,7 @@ uType origin orig_ty1 orig_ty2
     go (FunTy fun1 arg1) (FunTy fun2 arg2)
       = do { co_l <- uType origin fun1 fun2
            ; co_r <- uType origin arg1 arg2
-           ; return $ mkTcFunCo co_l co_r }
+           ; return $ mkTcFunCo Nominal co_l co_r }
 
         -- Always defer if a type synonym family (type function)
       	-- is involved.  (Data families behave rigidly.)
@@ -616,11 +616,11 @@ uType origin orig_ty1 orig_ty2
       -- See Note [Mismatched type lists and application decomposition]
       | tc1 == tc2, length tys1 == length tys2
       = do { cos <- zipWithM (uType origin) tys1 tys2
-           ; return $ mkTcTyConAppCo tc1 cos }
+           ; return $ mkTcTyConAppCo Nominal tc1 cos }
 
     go (LitTy m) ty@(LitTy n)
       | m == n
-      = return $ mkTcReflCo ty
+      = return $ mkTcNomReflCo ty
 
 	-- See Note [Care with type applications]
         -- Do not decompose FunTy against App; 
@@ -768,7 +768,7 @@ uUnfilledVar :: CtOrigin
 
 uUnfilledVar origin swapped tv1 details1 (TyVarTy tv2)
   | tv1 == tv2  -- Same type variable => no-op
-  = return (mkTcReflCo (mkTyVarTy tv1))
+  = return (mkTcNomReflCo (mkTyVarTy tv1))
 
   | otherwise  -- Distinct type variables
   = do  { lookup2 <- lookupTcTyVar tv2
@@ -824,8 +824,8 @@ uUnfilledVars origin swapped tv1 details1 tv2 details2
 	   -- k1 = k2, so we are free to update either way
            (EQ, MetaTv { mtv_info = i1, mtv_ref = ref1 }, 
                 MetaTv { mtv_info = i2, mtv_ref = ref2 })
-                | nicer_to_update_tv1 i1 i2 -> updateMeta tv1 ref1 ty2
-                | otherwise                 -> updateMeta tv2 ref2 ty1
+                | nicer_to_update_tv1 tv1 i1 i2 -> updateMeta tv1 ref1 ty2
+                | otherwise                     -> updateMeta tv2 ref2 ty1
            (EQ, MetaTv { mtv_ref = ref1 }, _) -> updateMeta tv1 ref1 ty2
            (EQ, _, MetaTv { mtv_ref = ref2 }) -> updateMeta tv2 ref2 ty1
 
@@ -838,9 +838,10 @@ uUnfilledVars origin swapped tv1 details1 tv2 details2
     ty1 = mkTyVarTy tv1
     ty2 = mkTyVarTy tv2
 
-    nicer_to_update_tv1 _     SigTv = True
-    nicer_to_update_tv1 SigTv _     = False
-    nicer_to_update_tv1 _         _ = isSystemName (Var.varName tv1)
+nicer_to_update_tv1 :: TcTyVar -> MetaInfo -> MetaInfo -> Bool
+nicer_to_update_tv1 _   _     SigTv = True
+nicer_to_update_tv1 _   SigTv _     = False
+nicer_to_update_tv1 tv1 _     _     = isSystemName (Var.varName tv1)
         -- Try not to update SigTvs; and try to update sys-y type
         -- variables in preference to ones gotten (say) by
         -- instantiating a polymorphic function with a user-written
@@ -1043,7 +1044,7 @@ lookupTcTyVar tyvar
 updateMeta :: TcTyVar -> TcRef MetaDetails -> TcType -> TcM TcCoercion
 updateMeta tv1 ref1 ty2
   = do { writeMetaTyVarRef tv1 ref1 ty2
-       ; return (mkTcReflCo ty2) }
+       ; return (mkTcNomReflCo ty2) }
 \end{code}
 
 Note [Unifying untouchables]
@@ -1068,6 +1069,31 @@ one of argTypeKind or openTypeKind.
 
 The situation is different in the core of the compiler, where we are perfectly
 happy to have types of kind Constraint on either end of an arrow.
+
+Note [Kind variables can be untouchable]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must use the careful function lookupTcTyVar to see if a kind
+variable is filled or unifiable.  It checks for touchablity, and kind
+variables can certainly be untouchable --- for example the variable
+might be bound outside an enclosing existental pattern match that
+binds an inner kind variable, which we don't want ot escape outside.
+
+This, or something closely related, was teh cause of Trac #8985.
+
+Note [Unifying kind variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Rather hackily, kind variables can be TyVars not just TcTyVars.
+Main reason is in
+   data instance T (D (x :: k)) = ...con-decls...
+Here we bring into scope a kind variable 'k', and use it in the
+con-decls.  BUT the con-decls will be finished and frozen, and
+are not amenable to subsequent substitution, so it makes sense
+to have the *final* kind-variable (a KindVar, not a TcKindVar) in
+scope.  So at least during kind unification we can encounter a
+KindVar.
+
+Hence the isTcTyVar tests before calling lookupTcTyVar.
+
 
 \begin{code}
 matchExpectedFunKind :: TcKind -> TcM (Maybe (TcKind, TcKind))
@@ -1117,37 +1143,66 @@ unifyKindX (TyConApp kc1 []) (TyConApp kc2 [])
 unifyKindX k1 k2 = unifyKindEq k1 k2
   -- In all other cases, let unifyKindEq do the work
 
+-------------------
 uKVar :: SwapFlag -> (TcKind -> TcKind -> TcM (Maybe Ordering))
       -> MetaKindVar -> TcKind -> TcM (Maybe Ordering)
 uKVar swapped unify_kind kv1 k2
-  | isTcTyVar kv1, isMetaTyVar kv1       -- See Note [Unifying kind variables]
-  = do  { mb_k1 <- readMetaTyVar kv1
-        ; case mb_k1 of
-            Flexi -> uUnboundKVar kv1 k2
-            Indirect k1 -> unSwap swapped unify_kind k1 k2 }
-  | TyVarTy kv2 <- k2, kv1 == kv2 
+  | isTcTyVar kv1
+  = do { lookup_res <- lookupTcTyVar kv1  -- See Note [Kind variables can be untouchable]
+       ; case lookup_res of
+           Filled k1    -> unSwap swapped unify_kind k1 k2
+           Unfilled ds1 -> uUnfilledKVar kv1 ds1 k2 }
+
+  | otherwise   -- See Note [Unifying kind variables]
+  = uUnfilledKVar kv1 vanillaSkolemTv k2
+
+-------------------
+uUnfilledKVar :: MetaKindVar -> TcTyVarDetails -> TcKind -> TcM (Maybe Ordering)
+uUnfilledKVar kv1 ds1 (TyVarTy kv2)
+  | kv1 == kv2
   = return (Just EQ)
 
-  | TyVarTy kv2 <- k2, isTcTyVar kv2, isMetaTyVar kv2
-  = uKVar (flipSwap swapped) unify_kind kv2 (TyVarTy kv1)
+  | isTcTyVar kv2
+  = do { lookup_res <- lookupTcTyVar kv2
+       ; case lookup_res of
+           Filled k2    -> uUnfilledKVar  kv1 ds1 k2
+           Unfilled ds2 -> uUnfilledKVars kv1 ds1 kv2 ds2 }
 
-  | otherwise 
-  = return Nothing
+  | otherwise  -- See Note [Unifying kind variables]
+  = uUnfilledKVars kv1 ds1 kv2 vanillaSkolemTv
 
-{- Note [Unifying kind variables]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Rather hackily, kind variables can be TyVars not just TcTyVars.
-Main reason is in 
-   data instance T (D (x :: k)) = ...con-decls...
-Here we bring into scope a kind variable 'k', and use it in the 
-con-decls.  BUT the con-decls will be finished and frozen, and
-are not amenable to subsequent substitution, so it makes sense
-to have the *final* kind-variable (a KindVar, not a TcKindVar) in 
-scope.  So at least during kind unification we can encounter a
-KindVar. 
+uUnfilledKVar kv1 ds1 non_var_k2
+  = case ds1 of
+      MetaTv { mtv_info = SigTv }
+        -> return Nothing
+      MetaTv { mtv_ref = ref1 }
+        -> do { k2a <- zonkTcKind non_var_k2
+              ; let k2b = defaultKind k2a
+                     -- MetaKindVars must be bound only to simple kinds
 
-Hence the isTcTyVar tests before using isMetaTyVar.
--}
+              ; dflags <- getDynFlags
+              ; case occurCheckExpand dflags kv1 k2b of
+                   OC_OK k2c -> do { writeMetaTyVarRef kv1 ref1 k2c; return (Just EQ) }
+                   _         -> return Nothing }
+      _ -> return Nothing
+
+-------------------
+uUnfilledKVars :: MetaKindVar -> TcTyVarDetails
+               -> MetaKindVar -> TcTyVarDetails
+               -> TcM (Maybe Ordering)
+-- kv1 /= kv2
+uUnfilledKVars kv1 ds1 kv2 ds2
+  = case (ds1, ds2) of
+      (MetaTv { mtv_info = i1, mtv_ref = r1 },
+       MetaTv { mtv_info = i2, mtv_ref = r2 })
+              | nicer_to_update_tv1 kv1 i1 i2 -> do_update kv1 r1 kv2
+              | otherwise                     -> do_update kv2 r2 kv1
+      (MetaTv { mtv_ref = r1 }, _) -> do_update kv1 r1 kv2
+      (_, MetaTv { mtv_ref = r2 }) -> do_update kv2 r2 kv1
+      _ -> return Nothing
+  where
+    do_update kv1 r1 kv2
+      = do { writeMetaTyVarRef kv1 r1 (mkTyVarTy kv2); return (Just EQ) }
 
 ---------------------------
 unifyKindEq :: TcKind -> TcKind -> TcM (Maybe Ordering)
@@ -1159,41 +1214,16 @@ unifyKindEq k1 (TyVarTy kv2) = uKVar IsSwapped  unifyKindEq kv2 k1
 unifyKindEq (FunTy a1 r1) (FunTy a2 r2)
   = do { mb1 <- unifyKindEq a1 a2; mb2 <- unifyKindEq r1 r2
        ; return (if isJust mb1 && isJust mb2 then Just EQ else Nothing) }
-  
+
 unifyKindEq (TyConApp kc1 k1s) (TyConApp kc2 k2s)
   | kc1 == kc2
   = ASSERT(length k1s == length k2s)
-       -- Should succeed since the kind constructors are the same, 
+       -- Should succeed since the kind constructors are the same,
        -- and the kinds are sort-checked, thus fully applied
     do { mb_eqs <- zipWithM unifyKindEq k1s k2s
-       ; return (if all isJust mb_eqs 
-                 then Just EQ 
+       ; return (if all isJust mb_eqs
+                 then Just EQ
                  else Nothing) }
 
 unifyKindEq _ _ = return Nothing
-
-----------------
-uUnboundKVar :: MetaKindVar -> TcKind -> TcM (Maybe Ordering)
-uUnboundKVar kv1 k2@(TyVarTy kv2)
-  | kv1 == kv2 = return (Just EQ)
-  | isTcTyVar kv2, isMetaTyVar kv2   -- Distinct kind variables
-  = do  { mb_k2 <- readMetaTyVar kv2
-        ; case mb_k2 of
-            Indirect k2 -> uUnboundKVar kv1 k2
-            Flexi       -> do { writeMetaTyVar kv1 k2; return (Just EQ) } }
-  | otherwise 
-  = do { writeMetaTyVar kv1 k2; return (Just EQ) }
-
-uUnboundKVar kv1 non_var_k2
-  | isSigTyVar kv1
-  = return Nothing
-  | otherwise
-  = do { k2a <- zonkTcKind non_var_k2
-       ; let k2b = defaultKind k2a
-                -- MetaKindVars must be bound only to simple kinds
-
-       ; dflags <- getDynFlags 
-       ; case occurCheckExpand dflags kv1 k2b of
-           OC_OK k2c -> do { writeMetaTyVar kv1 k2c; return (Just EQ) }
-           _         -> return Nothing }
 \end{code}

@@ -6,7 +6,7 @@ module Vectorise.Type.TyConDecl (
 import Vectorise.Type.Type
 import Vectorise.Monad
 import Vectorise.Env( GlobalEnv( global_fam_inst_env ) )
-import BuildTyCl
+import BuildTyCl( buildClass, buildDataCon )
 import Class
 import Type
 import TyCon
@@ -67,6 +67,7 @@ vectTyConDecl tycon name'
                      (snd . classTvsFds $ cls)  -- keep the original functional dependencies
                      []                         -- no associated types (for the moment)
                      methods'                   -- method info
+                     (classMinimalDef cls)      -- Inherit minimal complete definition from cls
                      rec_flag                   -- whether recursive
 
            -- the original dictionary constructor must map to the vectorised one

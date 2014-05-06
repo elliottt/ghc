@@ -198,6 +198,14 @@ static void searchHeapBlocks (HashTable *addrs, bdescr *bd)
 		prim = rtsTrue;
 		size = mut_arr_ptrs_sizeW((StgMutArrPtrs *)p);
 		break;
+
+	    case SMALL_MUT_ARR_PTRS_CLEAN:
+	    case SMALL_MUT_ARR_PTRS_DIRTY:
+	    case SMALL_MUT_ARR_PTRS_FROZEN:
+	    case SMALL_MUT_ARR_PTRS_FROZEN0:
+		prim = rtsTrue;
+		size = small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs *)p);
+		break;
 		
 	    case TSO:
 		prim = rtsTrue;
@@ -246,7 +254,7 @@ void checkUnload (StgClosure *static_objects)
   HashTable *addrs;
   StgClosure* p;
   const StgInfoTable *info;
-  ObjectCode *oc, *prev;
+  ObjectCode *oc, *prev, *next;
   gen_workspace *ws;
   StgClosure* link;
 
@@ -254,7 +262,7 @@ void checkUnload (StgClosure *static_objects)
 
   // Mark every unloadable object as unreferenced initially
   for (oc = unloaded_objects; oc; oc = oc->next) {
-      IF_DEBUG(linker, debugBelch("Checking whether to unload %s\n",
+      IF_DEBUG(linker, debugBelch("Checking whether to unload %" PATH_FMT "\n",
                                   oc->fileName));
       oc->referenced = rtsFalse;
   }
@@ -265,6 +273,13 @@ void checkUnload (StgClosure *static_objects)
       checkAddress(addrs, p);
       info = get_itbl(p);
       link = *STATIC_LINK(info, p);
+  }
+
+  // CAFs on revertible_caf_list are not on static_objects
+  for (p = (StgClosure*)revertible_caf_list;
+       p != END_OF_STATIC_LIST;
+       p = ((StgIndStatic *)p)->static_link) {
+      checkAddress(addrs, p);
   }
 
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
@@ -283,19 +298,21 @@ void checkUnload (StgClosure *static_objects)
   // marked as unreferenced can be physically unloaded, because we
   // have no references to it.
   prev = NULL;
-  for (oc = unloaded_objects; oc; prev = oc, oc = oc->next) {
+  for (oc = unloaded_objects; oc; oc = next) {
+      next = oc->next;
       if (oc->referenced == 0) {
           if (prev == NULL) {
               unloaded_objects = oc->next;
           } else {
               prev->next = oc->next;
           }
-          IF_DEBUG(linker, debugBelch("Unloading object file %s\n",
+          IF_DEBUG(linker, debugBelch("Unloading object file %" PATH_FMT "\n",
                                       oc->fileName));
           freeObjectCode(oc);
       } else {
-          IF_DEBUG(linker, debugBelch("Object file still in use: %s\n",
-                                      oc->fileName));
+          IF_DEBUG(linker, debugBelch("Object file still in use: %"
+                                      PATH_FMT "\n", oc->fileName));
+          prev = oc;
       }
   }
 

@@ -23,14 +23,12 @@ module StgCmmClosure (
         StandardFormInfo,        -- ...ditto...
         mkLFThunk, mkLFReEntrant, mkConLFInfo, mkSelectorLFInfo,
         mkApLFInfo, mkLFImported, mkLFArgument, mkLFLetNoEscape,
-        mkLFBlackHole,
         lfDynTag,
         maybeIsLFCon, isLFThunk, isLFReEntrant, lfUpdatable,
 
-        nodeMustPointToIt,
-        CallMethod(..), getCallMethod,
-
-        isKnownFun, funTag, tagForArity,
+        -- * Used by other modules
+        CgLoc(..), SelfLoopInfo, CallMethod(..),
+        nodeMustPointToIt, isKnownFun, funTag, tagForArity, getCallMethod,
 
         -- * ClosureInfo
         ClosureInfo,
@@ -69,11 +67,14 @@ module StgCmmClosure (
 import StgSyn
 import SMRep
 import Cmm
+import PprCmmExpr()
 
+import BlockId
 import CLabel
 import Id
 import IdInfo
 import DataCon
+import FastString
 import Name
 import Type
 import TypeRep
@@ -85,14 +86,46 @@ import DynFlags
 import Util
 
 -----------------------------------------------------------------------------
+--                Data types and synonyms
+-----------------------------------------------------------------------------
+
+-- These data types are mostly used by other modules, especially StgCmmMonad,
+-- but we define them here because some functions in this module need to
+-- have access to them as well
+
+data CgLoc
+  = CmmLoc CmmExpr      -- A stable CmmExpr; that is, one not mentioning
+                        -- Hp, so that it remains valid across calls
+
+  | LneLoc BlockId [LocalReg]             -- A join point
+        -- A join point (= let-no-escape) should only
+        -- be tail-called, and in a saturated way.
+        -- To tail-call it, assign to these locals,
+        -- and branch to the block id
+
+instance Outputable CgLoc where
+  ppr (CmmLoc e)    = ptext (sLit "cmm") <+> ppr e
+  ppr (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
+
+type SelfLoopInfo = (Id, BlockId, [LocalReg])
+
+-- used by ticky profiling
+isKnownFun :: LambdaFormInfo -> Bool
+isKnownFun (LFReEntrant _ _ _ _) = True
+isKnownFun LFLetNoEscape         = True
+isKnownFun _ = False
+
+
+-----------------------------------------------------------------------------
 --                Representations
 -----------------------------------------------------------------------------
 
 -- Why are these here?
 
--- NB: this is reliable because by StgCmm no Ids have unboxed tuple type
 idPrimRep :: Id -> PrimRep
 idPrimRep id = typePrimRep (idType id)
+    -- NB: typePrimRep fails on unboxed tuples,
+    --     but by StgCmm no Ids have unboxed tuple type
 
 addIdReps :: [Id] -> [(PrimRep, Id)]
 addIdReps ids = [(idPrimRep id, id) | id <- ids]
@@ -102,14 +135,6 @@ addArgReps args = [(argPrimRep arg, arg) | arg <- args]
 
 argPrimRep :: StgArg -> PrimRep
 argPrimRep arg = typePrimRep (stgArgType arg)
-
-isVoidRep :: PrimRep -> Bool
-isVoidRep VoidRep = True
-isVoidRep _other  = False
-
-isGcPtrRep :: PrimRep -> Bool
-isGcPtrRep PtrRep = True
-isGcPtrRep _      = False
 
 
 -----------------------------------------------------------------------------
@@ -122,23 +147,23 @@ isGcPtrRep _      = False
 -- tail call or return that identifier.
 
 data LambdaFormInfo
-  = LFReEntrant                -- Reentrant closure (a function)
-        TopLevelFlag        -- True if top level
-        !RepArity                -- Arity. Invariant: always > 0
-        !Bool                -- True <=> no fvs
+  = LFReEntrant         -- Reentrant closure (a function)
+        TopLevelFlag    -- True if top level
+        !RepArity       -- Arity. Invariant: always > 0
+        !Bool           -- True <=> no fvs
         ArgDescr        -- Argument descriptor (should really be in ClosureInfo)
 
-  | LFThunk                -- Thunk (zero arity)
+  | LFThunk             -- Thunk (zero arity)
         TopLevelFlag
-        !Bool                -- True <=> no free vars
-        !Bool                -- True <=> updatable (i.e., *not* single-entry)
+        !Bool           -- True <=> no free vars
+        !Bool           -- True <=> updatable (i.e., *not* single-entry)
         StandardFormInfo
-        !Bool                -- True <=> *might* be a function type
+        !Bool           -- True <=> *might* be a function type
 
-  | LFCon                -- A saturated constructor application
-        DataCon                -- The constructor
+  | LFCon               -- A saturated constructor application
+        DataCon         -- The constructor
 
-  | LFUnknown                -- Used for function arguments and imported things.
+  | LFUnknown           -- Used for function arguments and imported things.
                         -- We know nothing about this closure.
                         -- Treat like updatable "LFThunk"...
                         -- Imported things which we *do* know something about use
@@ -149,17 +174,10 @@ data LambdaFormInfo
                         --        because then we know the entry code will do
                         --        For a function, the entry code is the fast entry point
 
-  | LFUnLifted                -- A value of unboxed type;
+  | LFUnLifted          -- A value of unboxed type;
                         -- always a value, needs evaluation
 
-  | LFLetNoEscape        -- See LetNoEscape module for precise description
-
-  | LFBlackHole                -- Used for the closures allocated to hold the result
-                        -- of a CAF.  We want the target of the update frame to
-                        -- be in the heap, so we make a black hole to hold it.
-
-                        -- XXX we can very nearly get rid of this, but
-                        -- allocDynClosure needs a LambdaFormInfo
+  | LFLetNoEscape       -- See LetNoEscape module for precise description
 
 
 -------------------------
@@ -175,7 +193,7 @@ data StandardFormInfo
         --      case x of
         --           con a1,..,an -> ak
         -- and the constructor is from a single-constr type.
-       WordOff                 -- 0-origin offset of ak within the "goods" of
+       WordOff          -- 0-origin offset of ak within the "goods" of
                         -- constructor (Recall that the a1,...,an may be laid
                         -- out in the heap in a non-obvious order.)
 
@@ -205,9 +223,9 @@ mkLFLetNoEscape :: LambdaFormInfo
 mkLFLetNoEscape = LFLetNoEscape
 
 -------------
-mkLFReEntrant :: TopLevelFlag        -- True of top level
-              -> [Id]                -- Free vars
-              -> [Id]                 -- Args
+mkLFReEntrant :: TopLevelFlag    -- True of top level
+              -> [Id]            -- Free vars
+              -> [Id]            -- Args
               -> ArgDescr        -- Argument descriptor
               -> LambdaFormInfo
 
@@ -256,7 +274,7 @@ mkLFImported :: Id -> LambdaFormInfo
 mkLFImported id
   | Just con <- isDataConWorkId_maybe id
   , isNullaryRepDataCon con
-  = LFCon con        -- An imported nullary constructor
+  = LFCon con   -- An imported nullary constructor
                 -- We assume that the constructor is evaluated so that
                 -- the id really does point directly to the constructor
 
@@ -267,10 +285,6 @@ mkLFImported id
   = mkLFArgument id -- Not sure of exact arity
   where
     arity = idRepArity id
-
-------------
-mkLFBlackHole :: LambdaFormInfo
-mkLFBlackHole = LFBlackHole
 
 -----------------------------------------------------
 --                Dynamic pointer tagging
@@ -335,10 +349,6 @@ maybeIsLFCon _ = Nothing
 ------------
 isLFThunk :: LambdaFormInfo -> Bool
 isLFThunk (LFThunk {})  = True
-isLFThunk LFBlackHole   = True
-        -- return True for a blackhole: this function is used to determine
-        -- whether to use the thunk header in SMP mode, and a blackhole
-        -- must have one.
 isLFThunk _ = False
 
 isLFReEntrant :: LambdaFormInfo -> Bool
@@ -413,7 +423,6 @@ nodeMustPointToIt _ (LFCon _) = True
 
 nodeMustPointToIt _ (LFUnknown _)   = True
 nodeMustPointToIt _ LFUnLifted      = False
-nodeMustPointToIt _ LFBlackHole     = True    -- BH entry may require Node to point
 nodeMustPointToIt _ LFLetNoEscape   = False
 
 {- Note [GC recovery]
@@ -441,73 +450,94 @@ in TcGenDeriv.) -}
 whether or not it has free variables, and whether we're running
 sequentially or in parallel.
 
-Closure                               Node   Argument   Enter
-Characteristics                  Par   Req'd  Passing    Via
--------------------------------------------------------------------------------
-Unknown                         & no & yes & stack      & node
-Known fun (>1 arg), no fvs      & no & no  & registers  & fast entry (enough args)
-                                                        & slow entry (otherwise)
-Known fun (>1 arg), fvs         & no & yes & registers  & fast entry (enough args)
-0 arg, no fvs \r,\s             & no & no  & n/a        & direct entry
-0 arg, no fvs \u                & no & yes & n/a        & node
-0 arg, fvs \r,\s                & no & yes & n/a        & direct entry
-0 arg, fvs \u                   & no & yes & n/a        & node
-Unknown                         & yes & yes & stack     & node
-Known fun (>1 arg), no fvs      & yes & no  & registers & fast entry (enough args)
-                                                        & slow entry (otherwise)
-Known fun (>1 arg), fvs         & yes & yes & registers & node
-0 arg, no fvs \r,\s             & yes & no  & n/a       & direct entry
-0 arg, no fvs \u                & yes & yes & n/a       & node
-0 arg, fvs \r,\s                & yes & yes & n/a       & node
-0 arg, fvs \u                   & yes & yes & n/a       & node
+Closure                           Node   Argument   Enter
+Characteristics              Par   Req'd  Passing    Via
+---------------------------------------------------------------------------
+Unknown                     & no  & yes & stack     & node
+Known fun (>1 arg), no fvs  & no  & no  & registers & fast entry (enough args)
+                                                    & slow entry (otherwise)
+Known fun (>1 arg), fvs     & no  & yes & registers & fast entry (enough args)
+0 arg, no fvs \r,\s         & no  & no  & n/a       & direct entry
+0 arg, no fvs \u            & no  & yes & n/a       & node
+0 arg, fvs \r,\s,selector   & no  & yes & n/a       & node
+0 arg, fvs \r,\s            & no  & yes & n/a       & direct entry
+0 arg, fvs \u               & no  & yes & n/a       & node
+Unknown                     & yes & yes & stack     & node
+Known fun (>1 arg), no fvs  & yes & no  & registers & fast entry (enough args)
+                                                    & slow entry (otherwise)
+Known fun (>1 arg), fvs     & yes & yes & registers & node
+0 arg, fvs \r,\s,selector   & yes & yes & n/a       & node
+0 arg, no fvs \r,\s         & yes & no  & n/a       & direct entry
+0 arg, no fvs \u            & yes & yes & n/a       & node
+0 arg, fvs \r,\s            & yes & yes & n/a       & node
+0 arg, fvs \u               & yes & yes & n/a       & node
 
 When black-holing, single-entry closures could also be entered via node
 (rather than directly) to catch double-entry. -}
 
 data CallMethod
-  = EnterIt                -- No args, not a function
+  = EnterIt             -- No args, not a function
 
-  | JumpToIt                -- A join point
+  | JumpToIt BlockId [LocalReg] -- A join point or a header of a local loop
 
-  | ReturnIt                -- It's a value (function, unboxed value,
+  | ReturnIt            -- It's a value (function, unboxed value,
                         -- or constructor), so just return it.
 
   | SlowCall                -- Unknown fun, or known fun with
                         -- too few args.
 
   | DirectEntry         -- Jump directly, with args in regs
-        CLabel                 --   The code label
-        RepArity                 --   Its arity
+        CLabel          --   The code label
+        RepArity        --   Its arity
 
 getCallMethod :: DynFlags
               -> Name           -- Function being applied
-              -> CafInfo        -- Can it refer to CAF's?
-              -> LambdaFormInfo        -- Its info
-              -> RepArity                -- Number of available arguments
+              -> Id             -- Function Id used to chech if it can refer to
+                                -- CAF's and whether the function is tail-calling
+                                -- itself
+              -> LambdaFormInfo -- Its info
+              -> RepArity       -- Number of available arguments
+              -> CgLoc          -- Passed in from cgIdApp so that we can
+                                -- handle let-no-escape bindings and self-recursive
+                                -- tail calls using the same data constructor,
+                                -- JumpToIt. This saves us one case branch in
+                                -- cgIdApp
+              -> Maybe SelfLoopInfo -- can we perform a self-recursive tail call?
               -> CallMethod
 
-getCallMethod dflags _name _ lf_info _n_args
+getCallMethod dflags _ id _ n_args _cg_loc (Just (self_loop_id, block_id, args))
+  | gopt Opt_Loopification dflags, id == self_loop_id, n_args == length args
+  -- If these patterns match then we know that:
+  --   * loopification optimisation is turned on
+  --   * function is performing a self-recursive call in a tail position
+  --   * number of parameters of the function matches functions arity.
+  -- See Note [Self-recursive tail calls] in StgCmmExpr for more details
+  = JumpToIt block_id args
+
+getCallMethod dflags _name _ lf_info _n_args _cg_loc _self_loop_info
   | nodeMustPointToIt dflags lf_info && gopt Opt_Parallel dflags
-  =        -- If we're parallel, then we must always enter via node.
+  =     -- If we're parallel, then we must always enter via node.
         -- The reason is that the closure may have been
         -- fetched since we allocated it.
     EnterIt
 
-getCallMethod dflags name caf (LFReEntrant _ arity _ _) n_args
+getCallMethod dflags name id (LFReEntrant _ arity _ _) n_args _cg_loc
+              _self_loop_info
   | n_args == 0    = ASSERT( arity /= 0 )
                      ReturnIt        -- No args at all
   | n_args < arity = SlowCall        -- Not enough args
-  | otherwise      = DirectEntry (enterIdLabel dflags name caf) arity
+  | otherwise      = DirectEntry (enterIdLabel dflags name (idCafInfo id)) arity
 
-getCallMethod _ _name _ LFUnLifted n_args
+getCallMethod _ _name _ LFUnLifted n_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
-getCallMethod _ _name _ (LFCon _) n_args
+getCallMethod _ _name _ (LFCon _) n_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
-getCallMethod dflags name caf (LFThunk _ _ updatable std_form_info is_fun) n_args
-  | is_fun         -- it *might* be a function, so we must "call" it (which is always safe)
-  = SlowCall        -- We cannot just enter it [in eval/apply, the entry code
+getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
+              n_args _cg_loc _self_loop_info
+  | is_fun      -- it *might* be a function, so we must "call" it (which is always safe)
+  = SlowCall    -- We cannot just enter it [in eval/apply, the entry code
                 -- is the fast-entry code]
 
   -- Since is_fun is False, we are *definitely* looking at a data value
@@ -518,6 +548,12 @@ getCallMethod dflags name caf (LFThunk _ _ updatable std_form_info is_fun) n_arg
          of jumping directly to the entry code is still valid.  --SDM
         -}
   = EnterIt
+
+  -- even a non-updatable selector thunk can be updated by the garbage
+  -- collector, so we must enter it. (#8817)
+  | SelectorThunk{} <- std_form_info
+  = EnterIt
+
     -- We used to have ASSERT( n_args == 0 ), but actually it is
     -- possible for the optimiser to generate
     --   let bot :: Int = error Int "urk"
@@ -527,27 +563,21 @@ getCallMethod dflags name caf (LFThunk _ _ updatable std_form_info is_fun) n_arg
 
   | otherwise        -- Jump direct to code for single-entry thunks
   = ASSERT( n_args == 0 )
-    DirectEntry (thunkEntryLabel dflags name caf std_form_info updatable) 0
+    DirectEntry (thunkEntryLabel dflags name (idCafInfo id) std_form_info
+                updatable) 0
 
-getCallMethod _ _name _ (LFUnknown True) _n_args
+getCallMethod _ _name _ (LFUnknown True) _n_arg _cg_locs _self_loop_info
   = SlowCall -- might be a function
 
-getCallMethod _ name _ (LFUnknown False) n_args
+getCallMethod _ name _ (LFUnknown False) n_args _cg_loc _self_loop_info
   = ASSERT2( n_args == 0, ppr name <+> ppr n_args )
     EnterIt -- Not a function
 
-getCallMethod _ _name _ LFBlackHole _n_args
-  = SlowCall        -- Presumably the black hole has by now
-                -- been updated, but we don't know with
-                -- what, so we slow call it
+getCallMethod _ _name _ LFLetNoEscape _n_args (LneLoc blk_id lne_regs)
+              _self_loop_info
+  = JumpToIt blk_id lne_regs
 
-getCallMethod _ _name _ LFLetNoEscape _n_args
-  = JumpToIt
-
-isKnownFun :: LambdaFormInfo -> Bool
-isKnownFun (LFReEntrant _ _ _ _) = True
-isKnownFun LFLetNoEscape         = True
-isKnownFun _ = False
+getCallMethod _ _ _ _ _ _ _ = panic "Unknown call method"
 
 -----------------------------------------------------------------------------
 --                staticClosureRequired
@@ -680,7 +710,6 @@ mkCmmInfo ClosureInfo {..}
                  , cit_prof = closureProf
                  , cit_srt  = NoC_SRT }
 
-
 --------------------------------------
 --        Building ClosureInfos
 --------------------------------------
@@ -748,9 +777,6 @@ closureUpdReqd ClosureInfo{ closureLFInfo = lf_info } = lfUpdatable lf_info
 
 lfUpdatable :: LambdaFormInfo -> Bool
 lfUpdatable (LFThunk _ _ upd _ _)  = upd
-lfUpdatable LFBlackHole            = True
-        -- Black-hole closures are allocated to receive the results of an
-        -- alg case with a named default... so they need to be updated.
 lfUpdatable _ = False
 
 closureSingleEntry :: ClosureInfo -> Bool
@@ -797,8 +823,6 @@ closureLocalEntryLabel dflags
 mkClosureInfoTableLabel :: Id -> LambdaFormInfo -> CLabel
 mkClosureInfoTableLabel id lf_info
   = case lf_info of
-        LFBlackHole -> mkCAFBlackHoleInfoTableLabel
-
         LFThunk _ _ upd_flag (SelectorThunk offset) _
                       -> mkSelectorInfoLabel upd_flag offset
 

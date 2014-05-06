@@ -7,7 +7,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module Unify ( 
@@ -22,7 +22,7 @@ module Unify (
 	typesCantMatch,
 
         -- Side-effect free unification
-        tcUnifyTys, BindFlag(..),
+        tcUnifyTy, tcUnifyTys, BindFlag(..),
         niFixTvSubst, niSubstTvSet,
 
         UnifyResultM(..), UnifyResult, tcUnifyTysFG
@@ -39,6 +39,9 @@ import Type
 import TyCon
 import TypeRep
 import Util
+
+import Control.Monad (liftM, ap)
+import Control.Applicative (Applicative(..))
 \end{code}
 
 
@@ -383,19 +386,28 @@ failure.
 tcUnifyTysFG ("fine-grained") returns one of three results: success, occurs-check
 failure ("MaybeApart"), or general failure ("SurelyApart").
 
+See also Trac #8162.
+
+It's worth noting that unification in the presence of infinite types is not
+complete. This means that, sometimes, a closed type family does not reduce
+when it should. See test case indexed-types/should_fail/Overlap15 for an
+example.
+
 Note [The substitution in MaybeApart]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The constructor MaybeApart carries data with it, typically a TvSubstEnv. Why?
 Because consider unifying these:
 
-(a, a, a) ~ (Int, F Bool, Bool)
+(a, a, Int) ~ (b, [b], Bool)
 
-If we go left-to-right, we start with [a |-> Int]. Then, on the middle terms,
-we apply the subst we have so far and discover that Int is maybeApart from
-F Bool. But, we can't stop there! Because if we continue, we discover that
-Int is SurelyApart from Bool, and therefore the types are apart. This has
-practical consequences for the ability for closed type family applications
-to reduce. See test case indexed-types/should_compile/Overlap14.
+If we go left-to-right, we start with [a |-> b]. Then, on the middle terms, we
+apply the subst we have so far and discover that we need [b |-> [b]]. Because
+this fails the occurs check, we say that the types are MaybeApart (see above
+Note [Fine-grained unification]). But, we can't stop there! Because if we
+continue, we discover that Int is SurelyApart from Bool, and therefore the
+types are apart. This has practical consequences for the ability for closed
+type family applications to reduce. See test case
+indexed-types/should_compile/Overlap14.
 
 Note [Unifying with skolems]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -405,21 +417,27 @@ may later be instantiated with a unifyable type. So, we return maybeApart
 in these cases.
 
 \begin{code}
--- See Note [Unification and apartness]
+tcUnifyTy :: Type -> Type       -- All tyvars are bindable
+	  -> Maybe TvSubst	-- A regular one-shot (idempotent) substitution
+-- Simple unification of two types; all type variables are bindable
+tcUnifyTy ty1 ty2
+  = case initUM (const BindMe) (unify emptyTvSubstEnv ty1 ty2) of
+      Unifiable subst_env -> Just (niFixTvSubst subst_env)
+      _other              -> Nothing
+
+-----------------
 tcUnifyTys :: (TyVar -> BindFlag)
 	   -> [Type] -> [Type]
 	   -> Maybe TvSubst	-- A regular one-shot (idempotent) substitution
 -- The two types may have common type variables, and indeed do so in the
 -- second call to tcUnifyTys in FunDeps.checkClsFD
---
 tcUnifyTys bind_fn tys1 tys2
-  | Unifiable subst <- tcUnifyTysFG bind_fn tys1 tys2
-  = Just subst
-  | otherwise
-  = Nothing
+  = case tcUnifyTysFG bind_fn tys1 tys2 of
+      Unifiable subst -> Just subst
+      _               -> Nothing
 
 -- This type does double-duty. It is used in the UM (unifier monad) and to
--- return the final result.
+-- return the final result. See Note [Fine-grained unification]
 type UnifyResult = UnifyResultM TvSubst
 data UnifyResultM a = Unifiable a        -- the subst that unifies the types
                     | MaybeApart a       -- the subst has as much as we know
@@ -641,6 +659,13 @@ data BindFlag
 newtype UM a = UM { unUM :: (TyVar -> BindFlag)
 		         -> UnifyResultM a }
 
+instance Functor UM where
+      fmap = liftM
+
+instance Applicative UM where
+      pure = return
+      (<*>) = ap
+
 instance Monad UM where
   return a = UM (\_tvs -> Unifiable a)
   fail _   = UM (\_tvs -> SurelyApart) -- failed pattern match
@@ -652,9 +677,9 @@ instance Monad UM where
                                other        -> other
                            SurelyApart -> SurelyApart)
 
-initUM :: (TyVar -> BindFlag) -> UM TvSubst -> UnifyResult
+initUM :: (TyVar -> BindFlag) -> UM a -> UnifyResultM a
 initUM badtvs um = unUM um badtvs
-    
+
 tvBindFlag :: TyVar -> UM BindFlag
 tvBindFlag tv = UM (\tv_fn -> Unifiable (tv_fn tv))
 

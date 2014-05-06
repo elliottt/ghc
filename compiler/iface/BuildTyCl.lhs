@@ -8,13 +8,14 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module BuildTyCl (
         buildSynTyCon,
         buildAlgTyCon, 
         buildDataCon,
+        buildPatSyn, mkPatSynMatcherId, mkPatSynWrapperId,
         TcMethInfo, buildClass,
         distinctAbstractTyConRhs, totallyAbstractTyConRhs,
         mkNewTyConRhs, mkDataTyConRhs, 
@@ -26,6 +27,7 @@ module BuildTyCl (
 import IfaceEnv
 import FamInstEnv( FamInstEnvs )
 import DataCon
+import PatSyn
 import Var
 import VarSet
 import BasicTypes
@@ -34,6 +36,9 @@ import MkId
 import Class
 import TyCon
 import Type
+import TypeRep
+import TcType
+import Id
 import Coercion
 
 import DynFlags
@@ -176,6 +181,70 @@ mkDataConStupidTheta tycon arg_tys univ_tvs
     arg_tyvars      = tyVarsOfTypes arg_tys
     in_arg_tys pred = not $ isEmptyVarSet $ 
 		      tyVarsOfType pred `intersectVarSet` arg_tyvars
+
+
+------------------------------------------------------
+buildPatSyn :: Name -> Bool -> Bool
+            -> [Var]
+            -> [TyVar] -> [TyVar]     -- Univ and ext
+            -> ThetaType -> ThetaType -- Prov and req
+            -> Type                  -- Result type
+            -> TyVar
+            -> TcRnIf m n PatSyn
+buildPatSyn src_name declared_infix has_wrapper args univ_tvs ex_tvs prov_theta req_theta pat_ty tv
+  = do	{ (matcher, _, _) <- mkPatSynMatcherId src_name args
+                                              univ_tvs ex_tvs
+                                              prov_theta req_theta
+                                              pat_ty tv
+        ; wrapper <- case has_wrapper of
+            False -> return Nothing
+            True -> fmap Just $
+                    mkPatSynWrapperId src_name args
+                                      (univ_tvs ++ ex_tvs) (prov_theta ++ req_theta)
+                                      pat_ty
+        ; return $ mkPatSyn src_name declared_infix
+                            args
+                            univ_tvs ex_tvs
+                            prov_theta req_theta
+                            pat_ty
+                            matcher
+                            wrapper }
+
+mkPatSynMatcherId :: Name
+                  -> [Var]
+                  -> [TyVar]
+                  -> [TyVar]
+                  -> ThetaType -> ThetaType
+                  -> Type
+                  -> TyVar
+                  -> TcRnIf n m (Id, Type, Type)
+mkPatSynMatcherId name args univ_tvs ex_tvs prov_theta req_theta pat_ty res_tv
+  = do { matcher_name <- newImplicitBinder name mkMatcherOcc
+
+       ; let res_ty = TyVarTy res_tv
+             cont_ty = mkSigmaTy ex_tvs prov_theta $
+                       mkFunTys (map varType args) res_ty
+
+       ; let matcher_tau = mkFunTys [pat_ty, cont_ty, res_ty] res_ty
+             matcher_sigma = mkSigmaTy (res_tv:univ_tvs) req_theta matcher_tau
+             matcher_id = mkVanillaGlobal matcher_name matcher_sigma
+       ; return (matcher_id, res_ty, cont_ty) }
+
+mkPatSynWrapperId :: Name
+                  -> [Var]
+                  -> [TyVar]
+                  -> ThetaType
+                  -> Type
+                  -> TcRnIf n m Id
+mkPatSynWrapperId name args qtvs theta pat_ty
+  = do { wrapper_name <- newImplicitBinder name mkDataConWrapperOcc
+
+       ; let wrapper_tau = mkFunTys (map varType args) pat_ty
+             wrapper_sigma = mkSigmaTy qtvs theta wrapper_tau
+
+       ; let wrapper_id = mkVanillaGlobal wrapper_name wrapper_sigma
+       ; return wrapper_id }
+
 \end{code}
 
 
@@ -192,10 +261,11 @@ buildClass :: Bool		-- True <=> do not include unfoldings
 	   -> [FunDep TyVar]		   -- Functional dependencies
 	   -> [ClassATItem]		   -- Associated types
 	   -> [TcMethInfo]                 -- Method info
+	   -> ClassMinimalDef              -- Minimal complete definition
 	   -> RecFlag			   -- Info for type constructor
 	   -> TcRnIf m n Class
 
-buildClass no_unf tycon_name tvs roles sc_theta fds at_items sig_stuff tc_isrec
+buildClass no_unf tycon_name tvs roles sc_theta fds at_items sig_stuff mindef tc_isrec
   = fixM  $ \ rec_clas -> 	-- Only name generation inside loop
     do	{ traceIf (text "buildClass")
         ; dflags <- getDynFlags
@@ -271,7 +341,7 @@ buildClass no_unf tycon_name tvs roles sc_theta fds at_items sig_stuff tc_isrec
 
 	      ; result = mkClass tvs fds 
 			         sc_theta sc_sel_ids at_items
-				 op_items tycon
+				 op_items mindef tycon
 	      }
 	; traceIf (text "buildClass" <+> ppr tycon) 
 	; return result }

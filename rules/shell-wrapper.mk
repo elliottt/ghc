@@ -5,8 +5,8 @@
 # This file is part of the GHC build system.
 #
 # To understand how the build system works and how to modify it, see
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Modifying
 #
 # -----------------------------------------------------------------------------
 
@@ -62,7 +62,7 @@ ifeq "$$($1_$2_INSTALL_SHELL_WRAPPER_NAME)" ""
 $1_$2_INSTALL_SHELL_WRAPPER_NAME = $$($1_$2_PROG)
 endif
 
-# Install the binary in $(libexecdir), and install a shell wrapper in $(bindir)
+# Install the binary in $(ghclibexecdir), and install a shell wrapper in $(bindir)
 INSTALL_LIBEXECS += $1/$2/build/tmp/$$($1_$2_PROG)
 BINDIST_WRAPPERS += $$($1_$2_SHELL_WRAPPER_NAME)
 

@@ -10,7 +10,7 @@ module Specialise ( specProgram ) where
 
 import Id
 import TcType hiding( substTy, extendTvSubstList )
-import Type( TyVar, isDictTy, mkPiTypes, classifyPredType, PredTree(..), isIPClass )
+import Type   hiding( substTy, extendTvSubstList )
 import Coercion( Coercion )
 import CoreMonad
 import qualified CoreSubst
@@ -23,7 +23,7 @@ import CoreUtils        ( exprIsTrivial, applyTypeToArgs )
 import CoreFVs          ( exprFreeVars, exprsFreeVars, idFreeVars )
 import UniqSupply
 import Name
-import MkId             ( voidArgId, realWorldPrimId )
+import MkId             ( voidArgId, voidPrimId )
 import Maybes           ( catMaybes, isJust )
 import BasicTypes
 import HscTypes
@@ -34,6 +34,7 @@ import Outputable
 import FastString
 import State
 
+import Control.Applicative (Applicative(..))
 import Control.Monad
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -487,7 +488,7 @@ Some Ids have types like
 This seems curious at first, because we usually only have dictionary
 args whose types are of the form (C a) where a is a type variable.
 But this doesn't hold for the functions arising from instance decls,
-which sometimes get arguements with types of form (C (T a)) for some
+which sometimes get arguments with types of form (C (T a)) for some
 type constructor T.
 
 Should we specialise wrt this compound-type dictionary?  We used to say
@@ -565,9 +566,10 @@ Hence, the invariant is this:
 %************************************************************************
 
 \begin{code}
-specProgram :: DynFlags -> ModGuts -> CoreM ModGuts
-specProgram dflags guts@(ModGuts { mg_rules = rules, mg_binds = binds })
+specProgram :: ModGuts -> CoreM ModGuts
+specProgram guts@(ModGuts { mg_rules = rules, mg_binds = binds })
   = do { hpt_rules <- getRuleBase
+       ; dflags <- getDynFlags
        ; let local_rules = mg_rules guts
              rule_base = extendRuleBaseList hpt_rules rules
 
@@ -1137,7 +1139,7 @@ specCalls env rules_for_me calls_for_me fn rhs
              let body_ty = applyTypeToArgs rhs fn_type inst_args
                  (lam_args, app_args)           -- Add a dummy argument if body_ty is unlifted
                    | isUnLiftedType body_ty     -- C.f. WwLib.mkWorkerArgs
-                   = (poly_tyvars ++ [voidArgId], poly_tyvars ++ [realWorldPrimId])
+                   = (poly_tyvars ++ [voidArgId], poly_tyvars ++ [voidPrimId])
                    | otherwise = (poly_tyvars, poly_tyvars)
                  spec_id_ty = mkPiTypes lam_args body_ty
 
@@ -1614,10 +1616,10 @@ mkCallUDs env f args
     _trace_doc = vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts
                       , ppr (map (interestingDict env) dicts)]
     (tyvars, theta, _) = tcSplitSigmaTy (idType f)
-    constrained_tyvars = tyVarsOfTypes theta
+    constrained_tyvars = closeOverKinds (tyVarsOfTypes theta)
     n_tyvars           = length tyvars
     n_dicts            = length theta
-
+   
     spec_tys = [mk_spec_ty tv ty | (tv, Type ty) <- tyvars `zip` args]
     dicts    = [dict_expr | (_, dict_expr) <- theta `zip` (drop n_tyvars args)]
 
@@ -1866,6 +1868,13 @@ data SpecState = SpecState {
                      spec_uniq_supply :: UniqSupply,
                      spec_dflags :: DynFlags
                  }
+
+instance Functor SpecM where
+    fmap = liftM
+
+instance Applicative SpecM where
+    pure = return
+    (<*>) = ap
 
 instance Monad SpecM where
     SpecM x >>= f = SpecM $ do y <- x

@@ -95,7 +95,11 @@ TargetElf = YES
 endif
 
 # Some platforms don't support shared libraries
-NoSharedLibsPlatformList = arm-unknown-linux powerpc-unknown-linux
+NoSharedLibsPlatformList = powerpc-unknown-linux \
+	x86_64-unknown-mingw32 \
+	i386-unknown-mingw32 \
+	sparc-sun-solaris2 \
+	sparc-unknown-linux
 
 ifeq "$(SOLARIS_BROKEN_SHLD)" "YES"
 NoSharedLibsPlatformList += i386-unknown-solaris2
@@ -134,10 +138,7 @@ DYNAMIC_TOO = YES
 ifeq "$(TargetOS_CPP)" "mingw32"
 # This doesn't work on Windows yet
 DYNAMIC_GHC_PROGRAMS = NO
-else ifeq "$(TargetOS_CPP)" "freebsd"
-# FreeBSD cannot do proper resolution for $ORIGIN (due to a bug in
-# rtld(1)), so disable it by default (see #7819).
-DYNAMIC_GHC_PROGRAMS = NO
+DYNAMIC_TOO=NO
 else ifeq "$(PlatformSupportsSharedLibs)" "NO"
 DYNAMIC_GHC_PROGRAMS = NO
 else
@@ -387,8 +388,8 @@ endif
 BIN_DIST_NAME         = ghc-$(ProjectVersion)
 BIN_DIST_PREP_DIR     = bindistprep/$(BIN_DIST_NAME)
 BIN_DIST_PREP_TAR     = bindistprep/$(BIN_DIST_NAME)-$(TARGETPLATFORM).tar
-BIN_DIST_PREP_TAR_BZ2 = $(BIN_DIST_PREP_TAR).bz2
-BIN_DIST_TAR_BZ2      = $(BIN_DIST_NAME)-$(TARGETPLATFORM).tar.bz2
+BIN_DIST_PREP_TAR_COMP = $(BIN_DIST_PREP_TAR).$(TAR_COMP_EXT)
+BIN_DIST_TAR_COMP     = $(BIN_DIST_NAME)-$(TARGETPLATFORM).tar.$(TAR_COMP_EXT)
 
 # -----------------------------------------------------------------------------
 # Utilities programs: flags
@@ -421,6 +422,16 @@ BIN_DIST_TAR_BZ2      = $(BIN_DIST_NAME)-$(TARGETPLATFORM).tar.bz2
 # put options here that are only supported by very recent GHCs.
 #
 SRC_HC_OPTS += -H32m -O
+
+# Disable -O2 optimization. Otherwise amount of generated C code
+# makes things very slow to compile (~5 minutes on core-i7 for 'compiler/hsSyn/HsExpr.lhs')
+# and sometimes not compile at all (powerpc64 overflows something
+# on 'compiler/hsSyn/HsExpr.lhs').
+ifeq "$(GhcUnregisterised)" "YES"
+GhcStage1HcOpts=
+GhcStage2HcOpts=
+GhcStage3HcOpts=
+endif
 
 # -----------------------------------------------------------------------------
 # Names of programs in the GHC tree
@@ -471,6 +482,8 @@ endif
 
 GHC_PACKAGE_DB_FLAG = @GHC_PACKAGE_DB_FLAG@
 
+CMM_SINK_BOOTSTRAP_IS_NEEDED = @CMM_SINK_BOOTSTRAP_IS_NEEDED@
+
 #-----------------------------------------------------------------------------
 # C compiler
 #
@@ -490,6 +503,7 @@ endif
 TargetPlatformFull    = @TargetPlatformFull@
 GccLT34         = @GccLT34@
 GccLT46         = @GccLT46@
+GccIsClang      = @GccIsClang@
 
 CC              = $(WhatGccIsCalled)
 CC_STAGE0       = @CC_STAGE0@
@@ -639,7 +653,7 @@ PIC			= pic
 RANLIB_CMD = @RANLIB_CMD@
 REAL_RANLIB_CMD = @REAL_RANLIB_CMD@
 SED			= @SedCmd@
-SHELL			= /bin/sh
+SHELL			= @SHELL@
 
 HaveDtrace		= @HaveDtrace@
 USE_DTRACE = $(HaveDtrace)
@@ -647,6 +661,7 @@ DTRACE			= @DtraceCmd@
 
 LD = @LdCmd@
 NM = @NmCmd@
+AR = @ArCmd@
 OBJDUMP = @ObjdumpCmd@
 
 LLC = @LlcCmd@
@@ -684,6 +699,24 @@ PATCH_CMD      = @PatchCmd@
 TAR_CMD        = @TarCmd@
 BZIP2_CMD      = bzip2
 GZIP_CMD       = gzip
+XZ_CMD         = xz -9e
+
+# bzip2 is default compression
+TAR_COMP      = bzip2
+
+# select compression command and .tar extension based on TAR_COMP value
+ifeq "$(TAR_COMP)" "bzip2"
+TAR_COMP_CMD  = $(BZIP2_CMD)
+TAR_COMP_EXT  = bz2
+else ifeq "$(TAR_COMP)" "gzip"
+TAR_COMP_CMD  = $(GZIP_CMD)
+TAR_COMP_EXT  = gz
+else ifeq "$(TAR_COMP)" "xz"
+TAR_COMP_CMD  = $(XZ_CMD)
+TAR_COMP_EXT  = xz
+else
+$(error $$(TAR_COMP) set to unknown value "$(TAR_COMP)" (supported: "bzip2", "gzip", "xz"))
+endif
 
 ifeq "$(Windows_Host)" "YES"
 TOUCH_CMD      = $(utils/touchy_dist_INPLACE)
@@ -756,25 +789,6 @@ HSCOLOUR_SRCS = NO
 else
 HSCOLOUR_SRCS = YES
 endif
-
-################################################################################
-#
-#		31-bit-Int Core files
-#
-################################################################################
-
-#
-# It is possible to configure the compiler and prelude to support 31-bit
-# integers, suitable for a back-end and RTS using a tag bit on a 32-bit
-# architecture.  Currently the only useful output from this option is external Core
-# files.  The following additions to your build.mk will produce the
-# 31-bit core output.  Note that this is *not* just a library "way"; the
-# compiler must be built a special way too.
-
-# GhcCppOpts +=-DWORD_SIZE_IN_BITS=31
-# GhcLibHcOpts +=-fext-core -fno-code -DWORD_SIZE_IN_BITS=31
-# GhcLibCppOpts += -DWORD_SIZE_IN_BITS=31
-# SplitObjs=NO
 
 ################################################################################
 #

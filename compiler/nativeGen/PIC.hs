@@ -305,7 +305,7 @@ howToAccessLabel _ ArchPPC_64 os _ kind _
 howToAccessLabel dflags _ os _ _ _
         -- no PIC -> the dynamic linker does everything for us;
         --           if we don't dynamically link to Haskell code,
-        --           it actually manages to do so without messing thins up.
+        --           it actually manages to do so without messing things up.
         | osElfTarget os
         , not (gopt Opt_PIC dflags) && gopt Opt_Static dflags
         = AccessDirectly
@@ -728,9 +728,10 @@ initializePicBase_ppc ArchPPC os picReg
 
             fetchPC (BasicBlock bID insns) =
               BasicBlock bID (PPC.FETCHPC picReg
+                              : PPC.ADDIS tmp picReg (PPC.HI offsetToOffset)
                               : PPC.LD PPC.archWordSize tmp
-                                   (PPC.AddrRegImm picReg offsetToOffset)
-                              : PPC.ADD picReg picReg (PPC.RIReg tmp)
+                                   (PPC.AddrRegImm tmp (PPC.LO offsetToOffset))
+                              : PPC.ADD picReg picReg (PPC.RIReg picReg)
                               : insns)
 
         return (CmmProc info lab live (ListGraph blocks') : gotOffset : statics)

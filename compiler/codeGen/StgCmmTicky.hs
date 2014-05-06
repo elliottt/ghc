@@ -9,7 +9,7 @@
 {- OVERVIEW: ticky ticky profiling
 
 Please see
-http://hackage.haskell.org/trac/ghc/wiki/Debugging/TickyTicky and also
+http://ghc.haskell.org/trac/ghc/wiki/Debugging/TickyTicky and also
 edit it and the rest of this comment to keep them up-to-date if you
 change ticky-ticky. Thanks!
 
@@ -415,7 +415,7 @@ tickyDynAlloc :: Maybe Id -> SMRep -> LambdaFormInfo -> FCode ()
 --
 -- TODO what else to count while we're here?
 tickyDynAlloc mb_id rep lf = ifTicky $ getDynFlags >>= \dflags ->
-  let bytes = wORD_SIZE dflags * heapClosureSize dflags rep
+  let bytes = wORD_SIZE dflags * heapClosureSizeW dflags rep
 
       countGlobal tot ctr = do
         bumpTickyCounterBy tot bytes
@@ -485,7 +485,9 @@ tickyAllocHeap genuine hp
 
 -- the units are bytes
 
-tickyAllocPrim :: CmmExpr -> CmmExpr -> CmmExpr -> FCode ()
+tickyAllocPrim :: CmmExpr  -- ^ size of the full header, in bytes
+               -> CmmExpr  -- ^ size of the payload, in bytes
+               -> CmmExpr -> FCode ()
 tickyAllocPrim _hdr _goods _slop = ifTicky $ do
   bumpTickyCounter    (fsLit "ALLOC_PRIM_ctr")
   bumpTickyCounterByE (fsLit "ALLOC_PRIM_adm") _hdr

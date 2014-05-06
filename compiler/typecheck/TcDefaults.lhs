@@ -9,7 +9,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module TcDefaults ( tcDefaults ) where
@@ -39,7 +39,7 @@ tcDefaults :: [LDefaultDecl Name]
 tcDefaults [] 
   = getDeclaredDefaultTys	-- No default declaration, so get the
 				-- default types from the envt; 
-				-- i.e. use the curent ones
+				-- i.e. use the current ones
 				-- (the caller will put them back there)
 	-- It's important not to return defaultDefaultTys here (which
 	-- we used to do) because in a TH program, tcDefaults [] is called

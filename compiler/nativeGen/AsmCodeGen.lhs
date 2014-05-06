@@ -80,6 +80,7 @@ import qualified Stream
 import Data.List
 import Data.Maybe
 import Control.Exception
+import Control.Applicative (Applicative(..))
 import Control.Monad
 import System.IO
 
@@ -165,11 +166,13 @@ nativeCodeGen dflags this_mod h us cmms
       ArchPPC     -> nCG' (ppcNcgImpl    dflags)
       ArchSPARC   -> nCG' (sparcNcgImpl  dflags)
       ArchARM {}  -> panic "nativeCodeGen: No NCG for ARM"
+      ArchARM64   -> panic "nativeCodeGen: No NCG for ARM64"
       ArchPPC_64  -> panic "nativeCodeGen: No NCG for PPC 64"
       ArchAlpha   -> panic "nativeCodeGen: No NCG for Alpha"
       ArchMipseb  -> panic "nativeCodeGen: No NCG for mipseb"
       ArchMipsel  -> panic "nativeCodeGen: No NCG for mipsel"
       ArchUnknown -> panic "nativeCodeGen: No NCG for unknown arch"
+      ArchJavaScript -> panic "nativeCodeGen: No NCG for JavaScript"
 
 x86NcgImpl :: DynFlags -> NcgImpl (Alignment, CmmStatics) X86.Instr.Instr X86.Instr.JumpDest
 x86NcgImpl dflags
@@ -455,8 +458,10 @@ cmmNativeGen dflags this_mod ncgImpl us cmm count
 
         -- allocate registers
         (alloced, usAlloc, ppr_raStatsColor, ppr_raStatsLinear) <-
-         if ( gopt Opt_RegsGraph dflags
-           || gopt Opt_RegsIterative dflags)
+         if False
+           -- Disabled, see #7679, #8657
+           --  ( gopt Opt_RegsGraph dflags
+           --  || gopt Opt_RegsIterative dflags)
           then do
                 -- the regs usable for allocation
                 let (alloc_regs :: UniqFM (UniqSet RealReg))
@@ -871,6 +876,13 @@ cmmToCmm dflags this_mod (CmmProc info lbl live graph)
          return $ CmmProc info lbl live (ofBlockList (g_entry graph) blocks')
 
 newtype CmmOptM a = CmmOptM (DynFlags -> Module -> [CLabel] -> (# a, [CLabel] #))
+
+instance Functor CmmOptM where
+    fmap = liftM
+
+instance Applicative CmmOptM where
+    pure = return
+    (<*>) = ap
 
 instance Monad CmmOptM where
   return x = CmmOptM $ \_ _ imports -> (# x, imports #)

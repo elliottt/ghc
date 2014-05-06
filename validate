@@ -1,25 +1,45 @@
 #!/bin/sh
 
-# Flags:
-#   --no-clean:       don't make clean first, just carry on from
-#                     a previous interrupted validation run
-#   --testsuite-only: don't build the compiler, just run
-#                     the test suite
-#   --hpc:            build stage2 with -fhpc, and see how much of the
-#                     compiler the test suite covers.
-#                     2008-07-01: 63% slower than the default.
-#                     HTML generated here: testsuite/hpc_output/hpc_index.html
-#   --normal:         Default settings
-#   --fast:           Omit dyn way, omit binary distribution
-#   --slow:           Build stage2 with -DDEBUG.
-#                     2008-07-01: 14% slower than the default.
-
 set -e
+
+show_help () {
+    cat <<EOF
+Usage: $0 [FLAGS]...
+
+Validate GHC source tree against testsuite; see
+http://ghc.haskell.org/trac/ghc/wiki/TestingPatches for more
+information.
+
+Flags:
+  --no-clean        don't make clean first, just carry on from
+                    a previous interrupted validation run
+  --testsuite-only  don't build the compiler, just run the test suite
+  --hpc             build stage2 with -fhpc, and see how much of the
+                    compiler the test suite covers.
+                    2008-07-01: 63% slower than the default.
+                    HTML generated here: testsuite/hpc_output/hpc_index.html
+  --normal          Default settings
+  --fast            Omit dyn way, omit binary distribution
+  --slow            Build stage2 with -DDEBUG.
+                    2008-07-01: 14% slower than the default.
+  --no-dph:         Skip requiring libraries/dph. In --slow mode, these tests
+                    can take a substantial amount of time, and on some platforms
+                    with broken linkers, we don't want to try compiling it.
+  --help            shows this usage help.
+
+  Set environment variable 'CPUS' to number of cores, to exploit
+  multiple cpu cores, e.g.
+
+    CPUS=8 ./validate
+
+EOF
+}
 
 no_clean=0
 testsuite_only=0
 hpc=NO
 speed=NORMAL
+skip_dph=0
 
 while [ $# -gt 0 ]
 do
@@ -42,8 +62,15 @@ do
     --normal)
         speed=NORMAL
         ;;
+    --no-dph)
+        skip_dph=1
+        ;;
+    --help)
+        show_help
+        exit 0;;
     *)
-        echo "Bad argument: $1" >&2
+        echo "$0: unrecognized argument '$1'" >&2
+        echo "Try '$0 --help' for more information." >&2
         exit 1;;
     esac
     shift
@@ -62,8 +89,7 @@ check_packages () {
 
 if ! [ -d testsuite ]
 then
-    echo 'You need the testsuite to validate' >&2
-    echo 'Run "./sync-all --testsuite get" to get it' >&2
+    echo 'Could not find the testsuite for validation' >&2
     exit 1
 fi
 
@@ -95,7 +121,11 @@ if [ $no_clean -eq 0 ]; then
         INSTDIR=`cygpath -m "$INSTDIR"`
     fi
 
-    /usr/bin/perl -w boot --validate --required-tag=dph
+    if [ $skip_dph -eq 1 ]; then
+        /usr/bin/perl -w boot --validate
+    else
+        /usr/bin/perl -w boot --validate --required-tag=dph
+    fi
     ./configure --prefix="$INSTDIR" $config_args
 fi
 

@@ -1,5 +1,6 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 
+use warnings;
 use strict;
 use Cwd;
 use English;
@@ -7,6 +8,7 @@ use English;
 $| = 1; # autoflush stdout after each print, to avoid output after die
 
 my $initial_working_directory;
+my $exit_via_die;
 
 my $defaultrepo;
 my @packages;
@@ -18,6 +20,8 @@ my $get_mode;
 my $bare_flag = ""; # NOT the opposite of checked_out_flag (describes local repo state)
 
 my %tags;
+
+my $GITHUB = qr!(?:git@|git://|https://|http://|ssh://git@)github.com!;
 
 sub inDir {
     my $dir = shift;
@@ -50,11 +54,12 @@ sub parsePackages {
     foreach (@repos) {
         chomp;
         $lineNum++;
-        if (/^([^# ]+) +([^ ]+) +([^ ]+)$/) {
+        if (/^([^# ]+) +([^ ]+) +([^ ]+) +([^ ]+)$/) {
             my %line;
             $line{"localpath"}  = $1;
             $line{"tag"}        = $2;
             $line{"remotepath"} = $3;
+            $line{"upstreamurl"}= $4;
             push @packages, \%line;
 
             $tags{$2} = 0;
@@ -122,7 +127,7 @@ sub git {
     });
 }
 
-sub readgit {
+sub readgitline {
     my $dir = shift;
     my @args = @_;
 
@@ -137,12 +142,26 @@ sub readgit {
     });
 }
 
+sub readgit {
+    my $dir = shift;
+    my @args = @_;
+
+    &inDir($dir, sub {
+        open my $fh, '-|', 'git', @args
+            or die "Executing git @args failed: $!";
+        my $ret;
+        $ret .= $_ while <$fh>;
+        close $fh;
+        return $ret;
+    });
+}
+
 sub configure_repository {
     my $localpath = shift;
 
     &git($localpath, "config", "--local", "core.ignorecase", "true");
 
-    my $autocrlf = &readgit($localpath, 'config', '--get', 'core.autocrlf');
+    my $autocrlf = &readgitline($localpath, 'config', '--get', 'core.autocrlf');
     if ($autocrlf eq "true") {
         &git($localpath, "config", "--local", "core.autocrlf", "false");
         &git($localpath, "reset", "--hard");
@@ -160,21 +179,22 @@ sub getrepo {
         # Figure out where to get the other repositories from,
         # based on where this GHC repo came from.
         my $git_dir = $bare_flag ? "ghc.git" : ".";
-        my $branch = &readgit($git_dir, "rev-parse", "--abbrev-ref", "HEAD");
+        my $branch = &readgitline($git_dir, "rev-parse", "--abbrev-ref", "HEAD");
         die "Bad branch: $branch"
-            unless $branch =~ /^[a-zA-Z][a-zA-Z0-9.-]*$/;
-        my $remote = &readgit($git_dir, "config", "branch.$branch.remote");
+            unless $branch =~ m!^[a-zA-Z][a-zA-Z0-9./-]*$!;
+        my $remote = &readgitline($git_dir, "config", "branch.$branch.remote");
         if ($remote eq "") {
             # remotes are not mandatory for branches (e.g. not recorded by default for bare repos)
             $remote = "origin";
         }
         die "Bad remote: $remote"
-            unless $remote =~ /^[a-zA-Z][a-zA-Z0-9.-]*$/;
-        $repo = &readgit($git_dir, "config", "remote.$remote.url");
+            unless $remote =~ m!^[a-zA-Z][a-zA-Z0-9./-]*$!;
+        $repo = &readgitline($git_dir, "config", "remote.$remote.url");
     }
 
     my $repo_base;
     my $checked_out_tree;
+    my $repo_local = 0;
 
     if ($repo =~ /^...*:/) {
         # HTTP or SSH
@@ -205,6 +225,7 @@ sub getrepo {
     }
     elsif ($repo =~ /^\/|\.\.\/|.:(\/|\\)/) {
         # Local filesystem, either absolute (C:/ or /) or relative (../) path
+        $repo_local = 1;
         $repo_base = $repo;
         if (-f "$repo/HEAD") {
             # assume a local mirror:
@@ -222,7 +243,7 @@ sub getrepo {
         die "Couldn't work out repo";
     }
 
-    return $repo_base, $checked_out_tree;
+    return $repo_base, $checked_out_tree, $repo_local;
 }
 
 sub gitall {
@@ -243,9 +264,9 @@ sub gitall {
     my $doing;
     my $start_repo;
 
-    my ($repo_base, $checked_out_tree) = getrepo();
+    my ($repo_base, $checked_out_tree, $repo_local) = getrepo();
 
-    my $is_github_repo = $repo_base =~ m/(git@|git:\/\/|https:\/\/)github.com/;
+    my $is_github_repo = $repo_base =~ $GITHUB;
 
     @args = ();
 
@@ -399,10 +420,10 @@ sub gitall {
                 }
                 close($lsremote);
 
-                my $myhead = &readgit('.', 'rev-parse', '--verify', 'HEAD');
+                my $myhead = &readgitline('.', 'rev-parse', '--verify', 'HEAD');
 
                 if (not defined($remote_heads{$myhead})) {
-                    die "Sub module $localpath needs to be pushed; see http://hackage.haskell.org/trac/ghc/wiki/Repositories/Upstream";
+                    die "Sub module $localpath needs to be pushed; see http://ghc.haskell.org/trac/ghc/wiki/Repositories/Upstream";
                 }
                 
                 chdir($initial_working_directory);
@@ -412,7 +433,7 @@ sub gitall {
             # We don't automatically push to the submodules. If you want
             # to push to them then you need to use a special command, as
             # described on
-            # http://hackage.haskell.org/trac/ghc/wiki/Repositories/Upstream
+            # http://ghc.haskell.org/trac/ghc/wiki/Repositories/Upstream
             if ($remotepath ne "-") {
                 &git($localpath, "push", @args);
             }
@@ -456,13 +477,13 @@ sub gitall {
             $ignore_failure = 1;
             if ($remotepath eq '-') {
                 $rpath = "$localpath.git"; # N.B.: $localpath lacks the .git suffix
-                if ($localpath =~ /^libraries\//) {
+                if ($localpath =~ m!^(?:libraries|utils)/!) {
                     # FIXME: This is just a simple heuristic to
                     # infer the remotepath for Git submodules. A
                     # proper solution would require to parse the
                     # .gitmodules file to obtain the actual
                     # localpath<->remotepath mapping.
-                    $rpath =~ s/^libraries\//packages\//;
+                    $rpath =~ s!^(?:libraries|utils)/!packages/!;
                 }
                 $rpath = "$repo_base/$rpath";
             } else {
@@ -536,11 +557,11 @@ sub gitall {
             }
             print "$localpath";
             print (' ' x (40 - length($localpath)));
-            my $branch = &readgit($localpath, "rev-parse", "--abbrev-ref", "HEAD");
+            my $branch = &readgitline($localpath, "rev-parse", "--abbrev-ref", "HEAD");
             die "Bad branch: $branch"
-                unless $branch =~ /^[a-zA-Z][a-zA-Z0-9.-]*$/;
-            my $us   = &readgit(".", "ls-remote", $localpath, "refs/heads/$branch");
-            my $them = &readgit(".", "ls-remote", $compareto, "refs/heads/$branch");
+                unless $branch =~ m!^[a-zA-Z][a-zA-Z0-9./-]*$!;
+            my $us   = &readgitline(".", "ls-remote", $localpath, "refs/heads/$branch");
+            my $them = &readgitline(".", "ls-remote", $compareto, "refs/heads/$branch");
             $us   =~ s/[[:space:]].*//;
             $them =~ s/[[:space:]].*//;
             die "Bad commit of mine: $us"     unless (length($us)   eq 40);
@@ -560,13 +581,35 @@ sub gitall {
     unlink "resume";
 }
 
+sub gitInitSubmodules {
+    &git(".", "submodule", "init", @_);
+
+    my ($repo_base, $checked_out_tree, $repo_local) = getrepo();
+
+    my $submodulespaths = &readgit(".", "config", "--get-regexp", "^submodule[.].*[.]url");
+    # if we came from github, change the urls appropriately
+    while ($submodulespaths =~ m!^(submodule.(?:libraries|utils)/[a-zA-Z0-9]+.url) ($GITHUB)/ghc/packages/([a-zA-Z0-9]+).git$!gm) {
+        &git(".", "config", $1, "$2/ghc/packages-$3");
+    }
+
+    # if we came from a local repository, grab our submodules from their
+    # checkouts over there, if they exist.
+    if ($repo_local) {
+        while ($submodulespaths =~ m!^(submodule.((?:libraries|utils)/[a-zA-Z0-9]+).url) .*$!gm) {
+            if (-e "$repo_base/$2/.git") {
+                &git(".", "config", $1, "$repo_base/$2");
+            }
+        }
+    }
+}
+
 sub checkCurrentBranchIsMaster {
     my $branch = `git symbolic-ref HEAD`;
     $branch =~ s/refs\/heads\///;
     $branch =~ s/\n//;
 
     if ($branch !~ /master/) {
-        print "\nWarning: You trying to 'pull' while on branch '$branch'.\n"
+        print "\nWarning: You are trying to 'pull' while on branch '$branch'.\n"
             . "Updates to this script will happen on the master branch which\n"
             . "means the version on this branch may be out of date.\n\n";
     }
@@ -620,9 +663,9 @@ get
     before "get" that enable extra repositories. The full list is
     given at the end of this help. For example:
 
-    ./sync-all --testsuite get
+    ./sync-all --nofib get
 
-    would get the testsuite repository in addition to the usual set of
+    would get the nofib repository in addition to the usual set of
     subrepositories.
 
 remote add <remote-name>
@@ -706,8 +749,6 @@ Flags given *after* the command are passed to git.
         --bare:        describes the layout of the local repository tree.
 
   --nofib also clones the nofib benchmark suite
-
-  --testsuite also clones the ghc testsuite 
 
   --extra also clone some extra library packages
 
@@ -848,7 +889,7 @@ sub main {
     if ($bare_flag && ! $bare_found && ! $defaultrepo) {
         die "error: bare repository ghc.git not found.\n"
           . "       Either clone a bare ghc repo first or specify the repo location. E.g.:\n"
-          . "       ./sync-all --bare [--testsuite --nofib --extra] -r http://git.haskell.org get\n"
+          . "       ./sync-all --bare [--nofib --extra] -r http://git.haskell.org get\n"
     }
     elsif ($bare_found) {
         $bare_flag = "--bare";
@@ -891,18 +932,19 @@ sub main {
         my @submodule_args = grep(/^-q/,@_);
 
         if ($command eq "get") {
-            &git(".", "submodule", "init", @submodule_args);
+            &gitInitSubmodules(@submodule_args);
         }
+
         if ($command eq "pull") {
             my $gitConfig = &tryReadFile(".git/config");
             if ($gitConfig !~ /submodule/) {
-                &git(".", "submodule", "init", @submodule_args);
+                &gitInitSubmodules(@submodule_args);
             }
         }
         if ($command eq "get" or $command eq "pull") {
             my $gitConfig = &tryReadFile(".git/config");
             if ($gitConfig !~ /submodule/) {
-                &git(".", "submodule", "init", @submodule_args);
+                &gitInitSubmodules(@submodule_args);
             }
             &git(".", "submodule", "update", @submodule_args);
         }
@@ -915,85 +957,71 @@ BEGIN {
         checkCurrentBranchIsMaster();
     }
     $initial_working_directory = getcwd();
+
+    $SIG{__DIE__} = sub {
+      die @_ if $^S;
+      $exit_via_die = 1;
+    };
+
+    my @obsolete_dirs = qw!
+        testsuite
+        libraries/base
+        libraries/ghc-prim
+        libraries/template-haskell
+        libraries/integer-gmp
+        libraries/integer-simple
+        !;
+    for my $dir (@obsolete_dirs) {
+        if (-d "$dir/.git") {
+            print <<EOF;
+============================
+ATTENTION!
+
+You have a left-over $dir/.git folder in your GHC tree!
+
+Please backup or remove it (e.g. "rm -r $dir/.git") before
+proceeding as the aforesaid Git repository is now tracked as part of
+the ghc Git repository (see #8545 for more details)
+============================
+EOF
+            die "detected obsolete $dir/.git folder"
+        }
+    }
 }
 
 END {
+    return if $exit_via_die;
     my $ec = $?;
 
     chdir($initial_working_directory);
 
-    message "== Checking for old haddock repo";
-    if (-d "utils/haddock/.git") {
-        chdir("utils/haddock");
-        if ((system "git log -1 87e2ca11c3d1b1bc49900fba0b5c5c6f85650718 > /dev/null 2> /dev/null") == 0) {
-            print <<EOF;
+    my @obsolete_dirs = (
+        ["utils/haddock",    "87e2ca11c3d1b1bc49900fba0b5c5c6f85650718"],
+        ["libraries/binary", "749ac0efbde3b14901417364a872796598747aaf"],
+        ["libraries/mtl",    "c67d8f7247c612dc35242bc67e616f7ea35eadb9"],
+        ["libraries/Cabal",  "c8ebd66a32865f72ae03ee0663c62df3d77f08fe"],
+        );
+    for (@obsolete_dirs) {
+        my ($dir, $hash) = $_;
+        my $name = $dir =~ m!/([^/]+)$!;
+        message "== Checking for old $name repo";
+        if (-d "$dir/.git") {
+            chdir($dir);
+            if ((system "git log -1 $hash > /dev/null 2> /dev/null") == 0) {
+                print <<EOF;
 ============================
 ATTENTION!
 
-You have an old haddock repository in your GHC tree!
+You have an old $name repository in your GHC tree!
 
-Please remove it (e.g. "rm -r utils/haddock"), and then run
+Please remove it (e.g. "rm -r $dir"), and then run
 "./sync-all get" to get the new repository.
 ============================
 EOF
+            }
+            chdir($initial_working_directory);
         }
-        chdir($initial_working_directory);
     }
-
-    message "== Checking for old binary repo";
-    if (-d "libraries/binary/.git") {
-        chdir("libraries/binary");
-        if ((system "git log -1 749ac0efbde3b14901417364a872796598747aaf > /dev/null 2> /dev/null") == 0) {
-            print <<EOF;
-============================
-ATTENTION!
-
-You have an old binary repository in your GHC tree!
-
-Please remove it (e.g. "rm -r libraries/binary"), and then run
-"./sync-all get" to get the new repository.
-============================
-EOF
-        }
-        chdir($initial_working_directory);
-    }
-
-    message "== Checking for old mtl repo";
-    if (-d "libraries/mtl/.git") {
-        chdir("libraries/mtl");
-        if ((system "git log -1 c67d8f7247c612dc35242bc67e616f7ea35eadb9 > /dev/null 2> /dev/null") == 0) {
-            print <<EOF;
-============================
-ATTENTION!
-
-You have an old mtl repository in your GHC tree!
-
-Please remove it (e.g. "rm -r libraries/mtl"), and then run
-"./sync-all get" to get the new repository.
-============================
-EOF
-        }
-        chdir($initial_working_directory);
-    }
-
-    message "== Checking for old Cabal repo";
-    if (-d "libraries/Cabal/.git") {
-        chdir("libraries/Cabal");
-        if ((system "git log -1 c8ebd66a32865f72ae03ee0663c62df3d77f08fe > /dev/null 2> /dev/null") == 0) {
-            print <<EOF;
-============================
-ATTENTION!
-
-You have an old Cabal repository in your GHC tree!
-
-Please remove it (e.g. "rm -r libraries/Cabal"), and then run
-"./sync-all get" to get the new repository.
-============================
-EOF
-        }
-        chdir($initial_working_directory);
-    }
-
     message "== Checking for old time from tarball";
     if (-d "libraries/time" and ! -e "libraries/time/.git") {
             print <<EOF;
@@ -1004,6 +1032,28 @@ You have an old time package in your GHC tree!
 
 Please remove it (e.g. "rm -r libraries/time"), and then run
 "./sync-all get" to get the new repository.
+============================
+EOF
+    }
+
+    message "== Checking for obsolete Git repo URL";
+    my $repo_url = &readgitline(".", 'config', '--get', 'remote.origin.url');
+    if ($repo_url =~ /^http:\/\/darcs.haskell.org/) {
+            print <<EOF;
+============================
+ATTENTION!
+
+You seem to be using obsolete Git repository URLs.
+
+Please run
+
+  ./sync-all -r git://git.haskell.org remote set-url
+
+or (in case port 9418/tcp is filtered by your firewall)
+
+  ./sync-all -r http://git.haskell.org remote set-url
+
+to update your local checkout to use the new Git URLs.
 ============================
 EOF
     }

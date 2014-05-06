@@ -11,7 +11,7 @@ module StgCmm ( codeGen ) where
 #define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
 
-import StgCmmProf
+import StgCmmProf (initCostCentres, ldvEnter)
 import StgCmmMonad
 import StgCmmEnv
 import StgCmmBind
@@ -233,7 +233,12 @@ cgDataCon data_con
                              $ mk_code ticky_code
 
             mk_code ticky_code
-              =         -- NB: We don't set CC when entering data (WDP 94/06)
+              = -- NB: the closure pointer is assumed *untagged* on
+                -- entry to a constructor.  If the pointer is tagged,
+                -- then we should not be entering it.  This assumption
+                -- is used in ldvEnter and when tagging the pointer to
+                -- return it.
+                -- NB 2: We don't set CC when entering data (WDP 94/06)
                 do { _ <- ticky_code
                    ; ldvEnter (CmmReg nodeReg)
                    ; tickyReturnOldCon (length arg_things)
@@ -257,13 +262,10 @@ cgDataCon data_con
 --      Stuff to support splitting
 ---------------------------------------------------------------
 
--- If we're splitting the object, we need to externalise all the
--- top-level names (and then make sure we only use the externalised
--- one in any C label we use which refers to this name).
-
 maybeExternaliseId :: DynFlags -> Id -> FCode Id
 maybeExternaliseId dflags id
-  | gopt Opt_SplitObjs dflags,  -- Externalise the name for -split-objs
+  | gopt Opt_SplitObjs dflags,  -- See Note [Externalise when splitting]
+                                -- in StgCmmMonad
     isInternalName name = do { mod <- getModuleName
                              ; returnFC (setIdName id (externalise mod)) }
   | otherwise           = returnFC id

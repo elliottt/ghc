@@ -22,6 +22,7 @@ typedef enum {
 typedef 
    enum { SECTIONKIND_CODE_OR_RODATA,
           SECTIONKIND_RWDATA,
+          SECTIONKIND_INIT_ARRAY,
           SECTIONKIND_OTHER,
           SECTIONKIND_NOINFOAVAIL } 
    SectionKind;
@@ -42,6 +43,17 @@ typedef
       struct _ProddableBlock* next;
    }
    ProddableBlock;
+
+/*
+ * We must keep track of the StablePtrs that are created for foreign
+ * exports by constructor functions when the module is loaded, so that
+ * we can free them again when the module is unloaded.  If we don't do
+ * this, then the StablePtr will keep the module alive indefinitely.
+ */
+typedef struct ForeignExportStablePtr_ {
+    StgStablePtr stable_ptr;
+    struct ForeignExportStablePtr_ *next;
+} ForeignExportStablePtr;
 
 /* Jump Islands are sniplets of machine code required for relative
  * address relocations on the PowerPC, x86_64 and ARM.
@@ -118,6 +130,8 @@ typedef struct _ObjectCode {
     unsigned long   first_symbol_extra;
     unsigned long   n_symbol_extras;
 #endif
+
+    ForeignExportStablePtr *stable_ptrs;
 
 } ObjectCode;
 

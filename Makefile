@@ -5,8 +5,8 @@
 # This file is part of the GHC build system.
 #
 # To understand how the build system works and how to modify it, see
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Modifying
 #
 # -----------------------------------------------------------------------------
 
@@ -30,10 +30,10 @@ default : all
 
 # For help, type 'make help'
 .PHONY: help
-help :
+help:
 	@cat MAKEHELP
 
-ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
+ifneq "$(filter maintainer-clean distclean clean help,$(MAKECMDGOALS))" ""
 -include mk/config.mk
 else
 include mk/config.mk
@@ -72,10 +72,7 @@ endif
 	$(MAKE) -r --no-print-directory -f ghc.mk phase=final $@
 
 binary-dist: binary-dist-prep
-ifeq "$(mingw32_TARGET_OS)" "1"
-	mv bindistprep/*.exe .
-endif
-	mv bindistprep/*.tar.bz2 .
+	mv bindistprep/*.tar.$(TAR_COMP_EXT) .
 
 binary-dist-prep:
 ifeq "$(mingw32_TARGET_OS)" "1"

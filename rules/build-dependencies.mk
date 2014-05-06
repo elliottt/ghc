@@ -5,8 +5,8 @@
 # This file is part of the GHC build system.
 #
 # To understand how the build system works and how to modify it, see
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Modifying
 #
 # -----------------------------------------------------------------------------
 
@@ -53,18 +53,15 @@ endif
 #     Foo.dyn_o Foo.o : Foo.hs
 # lines, and create corresponding hi-rule lines
 #     <dollar>(eval <dollar>(call hi-rule,Foo.dyn_hi Foo.hi : %hi: %o Foo.hs))
-	sed '/hs$$$$/ p                                      ; \
-	     /hs$$$$/ s/o /hi /g                             ; \
-	     /hs$$$$/ s/:/ : %hi: %o /                       ; \
-	     /hs$$$$/ s/^/$$$$(eval $$$$(call hi-rule,/      ; \
-	     /hs$$$$/ s/$$$$/))/                             ; \
-	     /hs-boot$$$$/ p                                 ; \
-	     /hs-boot$$$$/ s/o-boot /hi-boot /g              ; \
-	     /hs-boot$$$$/ s/:/ : %hi-boot: %o-boot /        ; \
-	     /hs-boot$$$$/ s/^/$$$$(eval $$$$(call hi-rule,/ ; \
-	     /hs-boot$$$$/ s/$$$$/))/'                         \
-	    $$@.tmp2 > $$@
-
+	sed -e '/hs$$$$/ p' -e '/hs$$$$/ s/o /hi /g' \
+             -e '/hs$$$$/ s/:/ : %hi: %o /'                       \
+             -e '/hs$$$$/ s/^/$$$$(eval $$$$(call hi-rule,/'      \
+             -e '/hs$$$$/ s/$$$$/))/'                             \
+             -e '/hs-boot$$$$/ p' -e '/hs-boot$$$$/ s/o-boot /hi-boot /g' \
+             -e '/hs-boot$$$$/ s/:/ : %hi-boot: %o-boot /'        \
+             -e '/hs-boot$$$$/ s/^/$$$$(eval $$$$(call hi-rule,/' \
+             -e '/hs-boot$$$$/ s/$$$$/))/'                        \
+             $$@.tmp2 > $$@
 # Some of the C files (directly or indirectly) include the generated
 # includes files.
 $$($1_$2_depfile_c_asm) : $$(includes_H_CONFIG) $$(includes_H_PLATFORM)

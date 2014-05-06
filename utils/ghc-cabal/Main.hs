@@ -12,6 +12,7 @@ import Distribution.Simple.Configure
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.Program
 import Distribution.Simple.Program.HcPkg
+import Distribution.Simple.Setup (ConfigFlags(configStripLibs), fromFlag, toFlag)
 import Distribution.Simple.Utils (defaultPackageDesc, writeFileAtomic, toUTF8)
 import Distribution.Simple.Build (writeAutogenFiles)
 import Distribution.Simple.Register
@@ -27,7 +28,7 @@ import Data.Maybe
 import System.IO
 import System.Directory
 import System.Environment
-import System.Exit
+import System.Exit      (exitWith, ExitCode(..))
 import System.FilePath
 
 main :: IO ()
@@ -40,9 +41,10 @@ main = do hSetBuffering stdout LineBuffering
                   doCheck dir
               "copy" : dir : distDir
                      : strip : myDestDir : myPrefix : myLibdir : myDocdir
-                     : args' ->
+                     : ghcLibWays : args' ->
                   doCopy dir distDir
                          strip myDestDir myPrefix myLibdir myDocdir
+                         ("dyn" `elem` words ghcLibWays)
                          args'
               "register" : dir : distDir : ghc : ghcpkg : topdir
                          : myDestDir : myPrefix : myLibdir : myDocdir
@@ -127,11 +129,11 @@ runHsColour directory distdir args
  $ defaultMainArgs ("hscolour" : "--builddir" : distdir : args)
 
 doCopy :: FilePath -> FilePath
-       -> FilePath -> FilePath -> FilePath -> FilePath -> FilePath
+       -> FilePath -> FilePath -> FilePath -> FilePath -> FilePath -> Bool
        -> [String]
        -> IO ()
 doCopy directory distDir
-       strip myDestDir myPrefix myLibdir myDocdir
+       strip myDestDir myPrefix myLibdir myDocdir withSharedLibs
        args
  = withCurrentDirectory directory $ do
      let copyArgs = ["copy", "--builddir", distDir]
@@ -167,13 +169,23 @@ doCopy directory distDir
                                                  (installDirTemplates lbi)
                 progs = withPrograms lbi
                 stripProgram' = stripProgram {
-                    programFindLocation = \_ -> return (Just strip) }
+                    programFindLocation = \_ _ -> return (Just strip) }
 
             progs' <- configureProgram verbosity stripProgram' progs
             let lbi' = lbi {
                                withPrograms = progs',
-                               installDirTemplates = idts
+                               installDirTemplates = idts,
+                               configFlags = cfg,
+                               stripLibs = fromFlag (configStripLibs cfg),
+                               withSharedLib = withSharedLibs
                            }
+
+                -- This hack allows to interpret the "strip"
+                -- command-line argument being set to ':' to signify
+                -- disabled library stripping
+                cfg | strip == ":" = (configFlags lbi) { configStripLibs = toFlag False }
+                    | otherwise    = configFlags lbi
+
             f pd lbi' us flags
 
 doRegister :: FilePath -> FilePath -> FilePath -> FilePath
@@ -205,12 +217,13 @@ doRegister directory distDir ghc ghcpkg topdir
                 progs = withPrograms lbi
                 ghcpkgconf = topdir </> "package.conf.d"
                 ghcProgram' = ghcProgram {
-                    programPostConf = \_ _ -> return ["-B" ++ topdir],
-                    programFindLocation = \_ -> return (Just ghc) }
+                    programPostConf = \_ cp -> return cp { programDefaultArgs = ["-B" ++ topdir] },
+                    programFindLocation = \_ _ -> return (Just ghc) }
                 ghcPkgProgram' = ghcPkgProgram {
-                    programPostConf = \_ _ -> return $ ["--global-package-db", ghcpkgconf]
-                                                    ++ ["--force" | not (null myDestDir) ],
-                    programFindLocation = \_ -> return (Just ghcpkg) }
+                    programPostConf = \_ cp -> return cp { programDefaultArgs =
+                                                                ["--global-package-db", ghcpkgconf]
+                                                                ++ ["--force" | not (null myDestDir) ] },
+                    programFindLocation = \_ _ -> return (Just ghcpkg) }
                 configurePrograms ps conf = foldM (flip (configureProgram verbosity)) conf ps
 
             progs' <- configurePrograms [ghcProgram', ghcPkgProgram'] progs
@@ -449,7 +462,8 @@ generate directory distdir dll0Modules config_args
                 "$(eval $(" ++ directory ++ "_PACKAGE_MAGIC))"
                 ]
       writeFile (distdir ++ "/package-data.mk") $ unlines xs
-      writeFile (distdir ++ "/haddock-prologue.txt") $
+
+      writeFileUtf8 (distdir ++ "/haddock-prologue.txt") $
           if null (description pd) then synopsis pd
                                    else description pd
       unless (null dll0Modules) $
@@ -472,3 +486,8 @@ generate directory distdir dll0Modules config_args
      mkSearchPath = intercalate [searchPathSeparator]
      boolToYesNo True = "YES"
      boolToYesNo False = "NO"
+
+     -- | Version of 'writeFile' that always uses UTF8 encoding
+     writeFileUtf8 f txt = withFile f WriteMode $ \hdl -> do
+         hSetEncoding hdl utf8
+         hPutStr hdl txt

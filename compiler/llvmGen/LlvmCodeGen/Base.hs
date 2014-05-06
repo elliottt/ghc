@@ -54,6 +54,9 @@ import UniqSupply
 import ErrUtils
 import qualified Stream
 
+import Control.Monad (ap)
+import Control.Applicative (Applicative(..))
+
 -- ----------------------------------------------------------------------------
 -- * Some Data Types
 --
@@ -152,6 +155,8 @@ llvmFunArgs dflags live =
           isSSE (FloatReg _)  = True
           isSSE (DoubleReg _) = True
           isSSE (XmmReg _)    = True
+          isSSE (YmmReg _)    = True
+          isSSE (ZmmReg _)    = True
           isSSE _             = False
 
 -- | Llvm standard fun attributes
@@ -209,13 +214,19 @@ type LlvmEnvMap = UniqFM LlvmType
 
 -- | The Llvm monad. Wraps @LlvmEnv@ state as well as the @IO@ monad
 newtype LlvmM a = LlvmM { runLlvmM :: LlvmEnv -> IO (a, LlvmEnv) }
+
+instance Functor LlvmM where
+    fmap f m = LlvmM $ \env -> do (x, env') <- runLlvmM m env
+                                  return (f x, env')
+
+instance Applicative LlvmM where
+    pure = return
+    (<*>) = ap
+
 instance Monad LlvmM where
     return x = LlvmM $ \env -> return (x, env)
     m >>= f  = LlvmM $ \env -> do (x, env') <- runLlvmM m env
                                   runLlvmM (f x) env'
-instance Functor LlvmM where
-    fmap f m = LlvmM $ \env -> do (x, env') <- runLlvmM m env
-                                  return (f x, env')
 
 instance HasDynFlags LlvmM where
     getDynFlags = LlvmM $ \env -> return (envDynFlags env, env)
@@ -393,7 +404,7 @@ strDisplayName_llvm lbl = do
     dflags <- getDynFlags
     let sdoc = pprCLabel platform lbl
         depth = Outp.PartWay 1
-        style = Outp.mkUserStyle (const Outp.NameNotInScope2, const True) depth
+        style = Outp.mkUserStyle (\ _ _ -> Outp.NameNotInScope2, Outp.alwaysQualifyModules) depth
         str = Outp.renderWithStyle dflags sdoc style
     return (fsLit (dropInfoSuffix str))
 
@@ -411,7 +422,7 @@ strProcedureName_llvm lbl = do
     dflags <- getDynFlags
     let sdoc = pprCLabel platform lbl
         depth = Outp.PartWay 1
-        style = Outp.mkUserStyle (const Outp.NameUnqual, const False) depth
+        style = Outp.mkUserStyle Outp.neverQualify depth
         str = Outp.renderWithStyle dflags sdoc style
     return (fsLit str)
 

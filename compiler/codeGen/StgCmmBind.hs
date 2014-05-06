@@ -20,7 +20,8 @@ import StgCmmMonad
 import StgCmmEnv
 import StgCmmCon
 import StgCmmHeap
-import StgCmmProf
+import StgCmmProf (curCCS, ldvEnterClosure, enterCostCentreFun, enterCostCentreThunk,
+                   initUpdFrameProf)
 import StgCmmTicky
 import StgCmmLayout
 import StgCmmUtils
@@ -45,9 +46,9 @@ import Util
 import BasicTypes
 import Outputable
 import FastString
-import Maybes
 import DynFlags
 
+import Data.Maybe
 import Control.Monad
 
 ------------------------------------------------------------------------
@@ -267,7 +268,7 @@ mkRhsClosure    dflags bndr _cc _bi
                       [(DataAlt _, params, _use_mask,
                             (StgApp selectee [{-no args-}]))])
   |  the_fv == scrutinee                -- Scrutinee is the only free variable
-  && maybeToBool maybe_offset           -- Selectee is a component of the tuple
+  && isJust maybe_offset                -- Selectee is a component of the tuple
   && offset_into_int <= mAX_SPEC_SELECTEE_SIZE dflags -- Offset is small enough
   = -- NOT TRUE: ASSERT(is_single_constructor)
     -- The simplifier may have statically determined that the single alternative
@@ -285,7 +286,8 @@ mkRhsClosure    dflags bndr _cc _bi
                                -- Just want the layout
     maybe_offset          = assocMaybe params_w_offsets (NonVoid selectee)
     Just the_offset       = maybe_offset
-    offset_into_int       = the_offset - fixedHdrSize dflags
+    offset_into_int       = bytesToWordsRoundUp dflags the_offset
+                             - fixedHdrSizeW dflags
 
 ---------- Note [Ap thunks] ------------------
 mkRhsClosure    dflags bndr _cc _bi
@@ -340,7 +342,7 @@ mkRhsClosure dflags bndr cc _ fvs upd_flag args body
         ; dflags <- getDynFlags
         ; let   name  = idName bndr
                 descr = closureDescription dflags mod_name name
-                fv_details :: [(NonVoid Id, VirtualHpOffset)]
+                fv_details :: [(NonVoid Id, ByteOff)]
                 (tot_wds, ptr_wds, fv_details)
                    = mkVirtHeapOffsets dflags (isLFThunk lf_info)
                                        (addIdReps (map unsafe_stripNV reduced_fvs))
@@ -433,7 +435,7 @@ closureCodeBody :: Bool            -- whether this is a top-level binding
                 -> [NonVoid Id]    -- incoming args to the closure
                 -> Int             -- arity, including void args
                 -> StgExpr
-                -> [(NonVoid Id, VirtualHpOffset)] -- the closure's free vars
+                -> [(NonVoid Id, ByteOff)] -- the closure's free vars
                 -> FCode ()
 
 {- There are two main cases for the code for closures.
@@ -471,34 +473,52 @@ closureCodeBody top_lvl bndr cl_info cc args arity body fv_details
             \(_offset, node, arg_regs) -> do
                 -- Emit slow-entry code (for entering a closure through a PAP)
                 { mkSlowEntryCode bndr cl_info arg_regs
-
                 ; dflags <- getDynFlags
                 ; let node_points = nodeMustPointToIt dflags lf_info
                       node' = if node_points then Just node else Nothing
-                ; when node_points (ldvEnterClosure cl_info)
-
+                ; loop_header_id <- newLabelC
+                -- Extend reader monad with information that
+                -- self-recursive tail calls can be optimized into local
+                -- jumps. See Note [Self-recursive tail calls] in StgCmmExpr.
+                ; withSelfLoop (bndr, loop_header_id, arg_regs) $ do
+                {
                 -- Main payload
                 ; entryHeapCheck cl_info node' arity arg_regs $ do
-                { -- ticky after heap check to avoid double counting
-                  tickyEnterFun cl_info
+                { -- emit LDV code when profiling
+                  when node_points (ldvEnterClosure cl_info (CmmLocal node))
+                -- ticky after heap check to avoid double counting
+                ; tickyEnterFun cl_info
                 ; enterCostCentreFun cc
                     (CmmMachOp (mo_wordSub dflags)
-                         [ CmmReg nodeReg
+                         [ CmmReg (CmmLocal node) -- See [NodeReg clobbered with loopification]
                          , mkIntExpr dflags (funTag dflags cl_info) ])
                 ; fv_bindings <- mapM bind_fv fv_details
                 -- Load free vars out of closure *after*
                 -- heap check, to reduce live vars over check
                 ; when node_points $ load_fvs node lf_info fv_bindings
                 ; void $ cgExpr body
-                }}
+                }}}
+
   }
+
+-- Note [NodeReg clobbered with loopification]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- Previously we used to pass nodeReg (aka R1) here. With profiling, upon
+-- entering a closure, enterFunCCS was called with R1 passed to it. But since R1
+-- may get clobbered inside the body of a closure, and since a self-recursive
+-- tail call does not restore R1, a subsequent call to enterFunCCS received a
+-- possibly bogus value from R1. The solution is to not pass nodeReg (aka R1) to
+-- enterFunCCS. Instead, we pass node, the callee-saved temporary that stores
+-- the original value of R1. This way R1 may get modified but loopification will
+-- not care.
 
 -- A function closure pointer may be tagged, so we
 -- must take it into account when accessing the free variables.
-bind_fv :: (NonVoid Id, VirtualHpOffset) -> FCode (LocalReg, WordOff)
+bind_fv :: (NonVoid Id, ByteOff) -> FCode (LocalReg, ByteOff)
 bind_fv (id, off) = do { reg <- rebindToReg id; return (reg, off) }
 
-load_fvs :: LocalReg -> LambdaFormInfo -> [(LocalReg, WordOff)] -> FCode ()
+load_fvs :: LocalReg -> LambdaFormInfo -> [(LocalReg, ByteOff)] -> FCode ()
 load_fvs node lf_info = mapM_ (\ (reg, off) ->
    do dflags <- getDynFlags
       let tag = lfDynTag dflags lf_info
@@ -532,13 +552,13 @@ mkSlowEntryCode bndr cl_info arg_regs -- function closure is already in `Node'
   | otherwise = return ()
 
 -----------------------------------------
-thunkCode :: ClosureInfo -> [(NonVoid Id, VirtualHpOffset)] -> CostCentreStack
+thunkCode :: ClosureInfo -> [(NonVoid Id, ByteOff)] -> CostCentreStack
           -> LocalReg -> Int -> StgExpr -> FCode ()
 thunkCode cl_info fv_details _cc node arity body
   = do { dflags <- getDynFlags
        ; let node_points = nodeMustPointToIt dflags (closureLFInfo cl_info)
              node'       = if node_points then Just node else Nothing
-        ; ldvEnterClosure cl_info -- NB: Node always points when profiling
+        ; ldvEnterClosure cl_info (CmmLocal node) -- NB: Node always points when profiling
 
         -- Heap overflow check
         ; entryHeapCheck cl_info node' arity [] $ do
@@ -601,7 +621,7 @@ emitBlackHoleCode node = do
              -- work with profiling.
 
   when eager_blackholing $ do
-    emitStore (cmmOffsetW dflags node (fixedHdrSize dflags))
+    emitStore (cmmOffsetW dflags node (fixedHdrSizeW dflags))
                   (CmmReg (CmmGlobal CurrentTSO))
     emitPrimCall [] MO_WriteBarrier []
     emitStore node (CmmReg (CmmGlobal EagerBlackholeInfo))
@@ -653,7 +673,7 @@ pushUpdateFrame lbl updatee body
        updfr  <- getUpdFrameOff
        dflags <- getDynFlags
        let
-           hdr         = fixedHdrSize dflags * wORD_SIZE dflags
+           hdr         = fixedHdrSize dflags
            frame       = updfr + hdr + sIZEOF_StgUpdateFrame_NoHdr dflags
        --
        emitUpdateFrame dflags (CmmStackSlot Old frame) lbl updatee
@@ -662,7 +682,7 @@ pushUpdateFrame lbl updatee body
 emitUpdateFrame :: DynFlags -> CmmExpr -> CLabel -> CmmExpr -> FCode ()
 emitUpdateFrame dflags frame lbl updatee = do
   let
-           hdr         = fixedHdrSize dflags * wORD_SIZE dflags
+           hdr         = fixedHdrSize dflags
            off_updatee = hdr + oFFSET_StgUpdateFrame_updatee dflags
   --
   emitStore frame (mkLblExpr lbl)
@@ -672,81 +692,34 @@ emitUpdateFrame dflags frame lbl updatee = do
 -----------------------------------------------------------------------------
 -- Entering a CAF
 --
--- When a CAF is first entered, it creates a black hole in the heap,
--- and updates itself with an indirection to this new black hole.
---
--- We update the CAF with an indirection to a newly-allocated black
--- hole in the heap.  We also set the blocking queue on the newly
--- allocated black hole to be empty.
---
--- Why do we make a black hole in the heap when we enter a CAF?
---
---     - for a  generational garbage collector, which needs a fast
---       test for whether an updatee is in an old generation or not
---
---     - for the parallel system, which can implement updates more
---       easily if the updatee is always in the heap. (allegedly).
---
--- When debugging, we maintain a separate CAF list so we can tell when
--- a CAF has been garbage collected.
-
--- newCAF must be called before the itbl ptr is overwritten, since
--- newCAF records the old itbl ptr in order to do CAF reverting
--- (which Hugs needs to do in order that combined mode works right.)
---
-
--- ToDo [Feb 04]  This entire link_caf nonsense could all be moved
--- into the "newCAF" RTS procedure, which we call anyway, including
--- the allocation of the black-hole indirection closure.
--- That way, code size would fall, the CAF-handling code would
--- be closer together, and the compiler wouldn't need to know
--- about off_indirectee etc.
+-- See Note [CAF management] in rts/sm/Storage.c
 
 link_caf :: LocalReg           -- pointer to the closure
          -> Bool               -- True <=> updatable, False <=> single-entry
          -> FCode CmmExpr      -- Returns amode for closure to be updated
--- To update a CAF we must allocate a black hole, link the CAF onto the
--- CAF list, then update the CAF to point to the fresh black hole.
 -- This function returns the address of the black hole, so it can be
--- updated with the new value when available.  The reason for all of this
--- is that we only want to update dynamic heap objects, not static ones,
--- so that generational GC is easier.
+-- updated with the new value when available.
 link_caf node _is_upd = do
   { dflags <- getDynFlags
-    -- Alloc black hole specifying CC_HDR(Node) as the cost centre
-  ; let use_cc   = costCentreFrom dflags (CmmReg nodeReg)
-        blame_cc = use_cc
-        tso      = CmmReg (CmmGlobal CurrentTSO)
-
-  ; hp_rel <- allocDynClosureCmm Nothing cafBlackHoleInfoTable mkLFBlackHole
-                                         use_cc blame_cc [(tso,fixedHdrSize dflags)]
-        -- small optimisation: we duplicate the hp_rel expression in
-        -- both the newCAF call and the value returned below.
-        -- If we instead used allocDynClosureReg which assigns it to a reg,
-        -- then the reg is live across the newCAF call and gets spilled,
-        -- which is stupid.  Really we should have an optimisation pass to
-        -- fix this, but we don't yet. --SDM
-
-        -- Call the RTS function newCAF to add the CAF to the CafList
-        -- so that the garbage collector can find them
-        -- This must be done *before* the info table pointer is overwritten,
-        -- because the old info table ptr is needed for reversion
-  ; ret <- newTemp (bWord dflags)
-  ; emitRtsCallGen [(ret,NoHint)] (mkForeignLabel (fsLit "newCAF") Nothing ForeignLabelInExternalPackage IsFunction)
+        -- Call the RTS function newCAF, returning the newly-allocated
+        -- blackhole indirection closure
+  ; let newCAF_lbl = mkForeignLabel (fsLit "newCAF") Nothing
+                                    ForeignLabelInExternalPackage IsFunction
+  ; bh <- newTemp (bWord dflags)
+  ; emitRtsCallGen [(bh,AddrHint)] newCAF_lbl
       [ (CmmReg (CmmGlobal BaseReg),  AddrHint),
-        (CmmReg (CmmLocal node), AddrHint),
-        (hp_rel, AddrHint) ]
+        (CmmReg (CmmLocal node), AddrHint) ]
       False
 
   -- see Note [atomic CAF entry] in rts/sm/Storage.c
   ; updfr  <- getUpdFrameOff
+  ; let target = entryCode dflags (closureInfoPtr dflags (CmmReg (CmmLocal node)))
   ; emit =<< mkCmmIfThen
-      (CmmMachOp (mo_wordEq dflags) [ CmmReg (CmmLocal ret), CmmLit (zeroCLit dflags)])
+      (cmmEqWord dflags (CmmReg (CmmLocal bh)) (zeroExpr dflags))
         -- re-enter the CAF
-       (let target = entryCode dflags (closureInfoPtr dflags (CmmReg (CmmLocal node))) in
-        mkJump dflags NativeNodeCall target [] updfr)
+       (mkJump dflags NativeNodeCall target [] updfr)
 
-  ; return hp_rel }
+  ; return (CmmReg (CmmLocal bh)) }
 
 ------------------------------------------------------------------------
 --              Profiling
@@ -769,4 +742,3 @@ closureDescription dflags mod_name name
                       else pprModule mod_name <> char '.' <> ppr name) <>
                     char '>')
    -- showSDocDump, because we want to see the unique on the Name.
-

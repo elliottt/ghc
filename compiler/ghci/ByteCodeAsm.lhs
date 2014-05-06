@@ -35,6 +35,7 @@ import Outputable
 import Platform
 import Util
 
+import Control.Applicative (Applicative(..))
 import Control.Monad
 import Control.Monad.ST ( runST )
 import Control.Monad.Trans.Class
@@ -166,8 +167,8 @@ assembleBCO dflags (ProtoBCO nm instrs bitmap bsize arity _origin _malloced) = d
       insns_arr = Array.listArray (0, n_insns - 1) asm_insns
       !insns_barr = barr insns_arr
 
-      bitmap_arr = mkBitmapArray dflags bsize bitmap
-      !bitmap_barr = toByteArray bitmap_arr
+      bitmap_arr = mkBitmapArray bsize bitmap
+      !bitmap_barr = barr bitmap_arr
 
       ul_bco = UnlinkedBCO nm arity insns_barr bitmap_barr final_lits final_ptrs
 
@@ -178,15 +179,13 @@ assembleBCO dflags (ProtoBCO nm instrs bitmap bsize arity _origin _malloced) = d
 
   return ul_bco
 
-#if __GLASGOW_HASKELL__ > 706
-mkBitmapArray :: DynFlags -> Word16 -> [StgWord] -> UArrayStgWord Int
-mkBitmapArray dflags bsize bitmap
-  = SMRep.listArray (0, length bitmap) (toStgWord dflags (toInteger bsize) : bitmap)
-#else
-mkBitmapArray :: DynFlags -> Word16 -> [StgWord] -> UArray Int StgWord
-mkBitmapArray dflags bsize bitmap
-  = Array.listArray (0, length bitmap) (toStgWord dflags (toInteger bsize) : bitmap)
-#endif
+mkBitmapArray :: Word16 -> [StgWord] -> UArray Int Word
+-- Here the return type must be an array of Words, not StgWords,
+-- because the underlying ByteArray# will end up as a component
+-- of a BCO object.
+mkBitmapArray bsize bitmap
+  = Array.listArray (0, length bitmap) $
+      fromIntegral bsize : map (fromInteger . fromStgWord) bitmap
 
 -- instrs nonptrs ptrs
 type AsmState = (SizedSeq Word16,
@@ -222,6 +221,13 @@ data Assembler a
   | AllocLabel Word16 (Assembler a)
   | Emit Word16 [Operand] (Assembler a)
   | NullAsm a
+
+instance Functor Assembler where
+    fmap = liftM
+
+instance Applicative Assembler where
+    pure = return
+    (<*>) = ap
 
 instance Monad Assembler where
   return = NullAsm
@@ -454,6 +460,8 @@ push_alts L   = bci_PUSH_ALTS_L
 push_alts F   = bci_PUSH_ALTS_F
 push_alts D   = bci_PUSH_ALTS_D
 push_alts V16 = error "push_alts: vector"
+push_alts V32 = error "push_alts: vector"
+push_alts V64 = error "push_alts: vector"
 
 return_ubx :: ArgRep -> Word16
 return_ubx V   = bci_RETURN_V
@@ -463,6 +471,8 @@ return_ubx L   = bci_RETURN_L
 return_ubx F   = bci_RETURN_F
 return_ubx D   = bci_RETURN_D
 return_ubx V16 = error "return_ubx: vector"
+return_ubx V32 = error "return_ubx: vector"
+return_ubx V64 = error "return_ubx: vector"
 
 -- Make lists of host-sized words for literals, so that when the
 -- words are placed in memory at increasing addresses, the

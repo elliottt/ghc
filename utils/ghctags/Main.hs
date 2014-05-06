@@ -20,7 +20,6 @@ import SrcLoc
 
 import Distribution.Simple.GHC ( componentGhcOptions )
 import Distribution.Simple.Configure ( getPersistBuildConfig )
-import Distribution.Simple.Compiler ( compilerVersion )
 import Distribution.Simple.Program.GHC ( renderGhcOptions )
 import Distribution.PackageDescription ( library, libBuildInfo )
 import Distribution.Simple.LocalBuildInfo
@@ -191,8 +190,7 @@ flagsFromCabal distPref = do
       let bi = libBuildInfo lib
           odir = buildDir lbi
           opts = componentGhcOptions V.normal lbi bi clbi odir
-          version = compilerVersion (compiler lbi)
-      in return $ renderGhcOptions version opts
+      in return $ renderGhcOptions (compiler lbi) opts
     _ -> error "no library"
 
 ----------------------------------------------------------------
@@ -260,7 +258,7 @@ boundValues mod group =
                        , bind <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map hsLTyClDeclBinders (concat (hs_tyclds group))
+      tys = [ n | ns <- map hsLTyClDeclBinders (tyClGroupConcat (hs_tyclds group))
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of
@@ -284,6 +282,7 @@ boundThings modname lbinding =
     PatBind { pat_lhs = lhs } -> patThings lhs []
     VarBind { var_id = id } -> [FoundThing modname (getOccString id) (startOfLocated lbinding)]
     AbsBinds { } -> [] -- nothing interesting in a type abstraction
+    PatSynBind { patsyn_id = id } -> [thing id]
   where thing = foundOfLName modname
         patThings lpat tl =
           let loc = startOfLocated lpat
@@ -299,7 +298,7 @@ boundThings modname lbinding =
                TuplePat ps _ _ -> foldr patThings tl ps
                PArrPat ps _ -> foldr patThings tl ps
                ConPatIn _ conargs -> conArgs conargs tl
-               ConPatOut _ _ _ _ conargs _ -> conArgs conargs tl
+               ConPatOut{ pat_args = conargs } -> conArgs conargs tl
                LitPat _ -> tl
                NPat _ _ _ -> tl -- form of literal pattern?
                NPlusKPat id _ _ _ -> thing id : tl

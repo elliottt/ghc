@@ -6,7 +6,7 @@ The @FamInst@ type: family instance heads
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module FamInst ( 
@@ -60,7 +60,7 @@ newFamInst :: FamFlavor -> CoAxiom Unbranched -> TcRnIf gbl lcl FamInst
 -- Called from the vectoriser monad too, hence the rather general type
 newFamInst flavor axiom@(CoAxiom { co_ax_branches = FirstBranch branch
                                  , co_ax_tc = fam_tc })
-  = do { (subst, tvs') <- tcInstSkolTyVarsLoc loc tvs
+  = do { (subst, tvs') <- tcInstSigTyVarsLoc loc tvs
        ; return (FamInst { fi_fam      = fam_tc_name
                          , fi_flavor   = flavor
                          , fi_tcs      = roughMatchTcs lhs
@@ -244,10 +244,10 @@ tcExtendLocalFamInstEnv fam_insts thing_inside
                                           fam_insts
       ; let env' = env { tcg_fam_insts    = fam_insts'
 		       , tcg_fam_inst_env = inst_env' }
-      ; setGblEnv env' thing_inside 
+      ; setGblEnv env' thing_inside
       }
 
--- Check that the proposed new instance is OK, 
+-- Check that the proposed new instance is OK,
 -- and then add it to the home inst env
 -- This must be lazy in the fam_inst arguments, see Note [Lazy axiom match]
 -- in FamInstEnv.lhs
@@ -258,10 +258,13 @@ addLocalFamInst (home_fie, my_fis) fam_inst
   = do { traceTc "addLocalFamInst" (ppr fam_inst)
 
        ; isGHCi <- getIsGHCi
- 
+       ; mod <- getModule
+       ; traceTc "alfi" (ppr mod $$ ppr isGHCi)
+
            -- In GHCi, we *override* any identical instances
            -- that are also defined in the interactive context
-       ; let (home_fie', my_fis') 
+           -- Trac #7102
+       ; let (home_fie', my_fis')
                | isGHCi    = ( deleteFromFamInstEnv home_fie fam_inst
                              , filterOut (identicalFamInst fam_inst) my_fis)
                | otherwise = (home_fie, my_fis)
@@ -276,9 +279,8 @@ addLocalFamInst (home_fie, my_fis) fam_inst
        ; no_conflict <- checkForConflicts inst_envs fam_inst
        ; if no_conflict then
             return (home_fie'', fam_inst : my_fis')
-         else 
+         else
             return (home_fie,   my_fis) }
-
 \end{code}
 
 %************************************************************************
@@ -331,3 +333,4 @@ tcGetFamInstEnvs
   = do { eps <- getEps; env <- getGblEnv
        ; return (eps_fam_inst_env eps, tcg_fam_inst_env env) }
 \end{code}
+

@@ -200,7 +200,8 @@ genCall (PrimTarget (MO_UF_Conv _)) [_] args =
     "Can only handle 1, given" ++ show (length args) ++ "."
 
 -- Handle prefetching data
-genCall t@(PrimTarget MO_Prefetch_Data) [] args = do
+genCall t@(PrimTarget (MO_Prefetch_Data localityInt)) [] args
+  | 0 <= localityInt && localityInt <= 3 = do
     ver <- getLlvmVer
     let argTy | ver <= 29  = [i8Ptr, i32, i32]
               | otherwise  = [i8Ptr, i32, i32, i32]
@@ -214,12 +215,13 @@ genCall t@(PrimTarget MO_Prefetch_Data) [] args = do
     (argVars', stmts3)      <- castVars $ zip argVars argTy
 
     trash <- getTrashStmts
-    let argSuffix | ver <= 29  = [mkIntLit i32 0, mkIntLit i32 3]
-                  | otherwise  = [mkIntLit i32 0, mkIntLit i32 3, mkIntLit i32 1]
+    let argSuffix | ver <= 29  = [mkIntLit i32 0, mkIntLit i32 localityInt]
+                  | otherwise  = [mkIntLit i32 0, mkIntLit i32 localityInt, mkIntLit i32 1]
         call = Expr $ Call StdCall fptr (argVars' ++ argSuffix) []
         stmts = stmts1 `appOL` stmts2 `appOL` stmts3
                 `appOL` trash `snocOL` call
     return (stmts, top1 ++ top2)
+  | otherwise = panic $ "prefetch locality level integer must be between 0 and 3, given: " ++ (show localityInt)
 
 -- Handle PopCnt and BSwap that need to only convert arg and return types
 genCall t@(PrimTarget (MO_PopCnt w)) dsts args =
@@ -296,6 +298,7 @@ genCall target res args = do
                  CCallConv    -> CC_Ccc
                  CApiConv     -> CC_Ccc
                  PrimCallConv -> panic "LlvmCodeGen.CodeGen.genCall: PrimCallConv"
+                 JavaScriptCallConv -> panic "LlvmCodeGen.CodeGen.genCall: JavaScriptCallConv"
 
             PrimTarget   _ -> CC_Ccc
 
@@ -544,7 +547,8 @@ cmmPrimOpFunctions mop = do
     (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     (MO_BSwap w)  -> fsLit $ "llvm.bswap."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
 
-    MO_Prefetch_Data -> fsLit "llvm.prefetch"
+    (MO_Prefetch_Data _ )-> fsLit "llvm.prefetch"
+
 
     MO_S_QuotRem {}  -> unsupported
     MO_U_QuotRem {}  -> unsupported
@@ -966,6 +970,9 @@ genMachOp _ op [x] = case op of
 
     MO_VS_Quot    _ _ -> panicOp
     MO_VS_Rem     _ _ -> panicOp
+
+    MO_VU_Quot    _ _ -> panicOp
+    MO_VU_Rem     _ _ -> panicOp
  
     MO_VF_Insert  _ _ -> panicOp
     MO_VF_Extract _ _ -> panicOp
@@ -1006,7 +1013,7 @@ genMachOp _ op [x] = case op of
                  w | w > toWidth -> sameConv' reduce
                  _w              -> return x'
         
-        panicOp = panic $ "LLVM.CodeGen.genMachOp: non unary op encourntered"
+        panicOp = panic $ "LLVM.CodeGen.genMachOp: non unary op encountered"
                        ++ "with one argument! (" ++ show op ++ ")"
 
 -- Handle GlobalRegs pointers
@@ -1139,6 +1146,9 @@ genMachOp_slow opt op [x, y] = case op of
 
     MO_VS_Quot l w -> genCastBinMach (LMVector l (widthToLlvmInt w)) LM_MO_SDiv
     MO_VS_Rem  l w -> genCastBinMach (LMVector l (widthToLlvmInt w)) LM_MO_SRem
+
+    MO_VU_Quot l w -> genCastBinMach (LMVector l (widthToLlvmInt w)) LM_MO_UDiv
+    MO_VU_Rem  l w -> genCastBinMach (LMVector l (widthToLlvmInt w)) LM_MO_URem
  
     MO_VF_Add  l w -> genCastBinMach (LMVector l (widthToLlvmFloat w)) LM_MO_FAdd
     MO_VF_Sub  l w -> genCastBinMach (LMVector l (widthToLlvmFloat w)) LM_MO_FSub
@@ -1251,7 +1261,7 @@ genMachOp_slow opt op [x, y] = case op of
                 else
                     panic $ "isSMulOK: Not bit type! (" ++ showSDoc dflags (ppr word) ++ ")"
 
-        panicOp = panic $ "LLVM.CodeGen.genMachOp_slow: unary op encourntered"
+        panicOp = panic $ "LLVM.CodeGen.genMachOp_slow: unary op encountered"
                        ++ "with two arguments! (" ++ show op ++ ")"
 
 -- More then two expression, invalid!
@@ -1526,6 +1536,8 @@ funEpilogue live = do
         isSSE (FloatReg _)  = True
         isSSE (DoubleReg _) = True
         isSSE (XmmReg _)    = True
+        isSSE (YmmReg _)    = True
+        isSSE (ZmmReg _)    = True
         isSSE _             = False
 
     -- Set to value or "undef" depending on whether the register is

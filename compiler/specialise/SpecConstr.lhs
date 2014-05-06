@@ -1,6 +1,6 @@
-ToDo [Nov 2010]
+ToDo [Oct 2013]
 ~~~~~~~~~~~~~~~
-1. Use a library type rather than an annotation for ForceSpecConstr
+1. Nuke ForceSpecConstr for good (it is subsumed by GHC.Types.SPEC in ghc-prim)
 2. Nuke NoSpecConstr
 
 %
@@ -31,7 +31,7 @@ import DataCon
 import Coercion         hiding( substTy, substCo )
 import Rules
 import Type             hiding ( substTy )
-import TyCon            ( isRecursiveTyCon )
+import TyCon            ( isRecursiveTyCon, tyConName )
 import Id
 import MkCore           ( mkImpossibleExpr )
 import Var
@@ -53,13 +53,13 @@ import UniqFM
 import MonadUtils
 import Control.Monad    ( zipWithM )
 import Data.List
+import PrelNames        ( specTyConName )
 
-
--- See Note [SpecConstrAnnotation]
+-- See Note [Forcing specialisation]
 #ifndef GHCI
 type SpecConstrAnnotation = ()
 #else
-import TyCon            ( TyCon )
+import TyCon ( TyCon )
 import GHC.Exts( SpecConstrAnnotation(..) )
 #endif
 \end{code}
@@ -335,7 +335,7 @@ I wonder if SpecConstr couldn't be extended to handle this? After all,
 lambda is a sort of constructor for functions and perhaps it already
 has most of the necessary machinery?
 
-Furthermore, there's an immediate win, because you don't need to allocate the lamda
+Furthermore, there's an immediate win, because you don't need to allocate the lambda
 at the call site; and if perchance it's called in the recursive call, then you
 may avoid allocating it altogether.  Just like for constructors.
 
@@ -396,16 +396,19 @@ use the calls in the un-specialised RHS as seeds.  We call these
 
 Note [Top-level recursive groups]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If all the bindings in a top-level recursive group are not exported,
-all the calls are in the rest of the top-level bindings.
-This means we can specialise with those call patterns instead of with the RHSs
-of the recursive group.
+If all the bindings in a top-level recursive group are local (not
+exported), then all the calls are in the rest of the top-level
+bindings.  This means we can specialise with those call patterns
+instead of with the RHSs of the recursive group.
 
-To get the call usage information, we work backwards through the top-level bindings
-so we see the usage before we get to the binding of the function.
-Before we can collect the usage though, we go through all the bindings and add them
-to the environment. This is necessary because usage is only tracked for functions
-in the environment.
+(Question: maybe we should *also* use calls in the rest of the
+top-level bindings as seeds?
+
+To get the call usage information, we work backwards through the
+top-level bindings so we see the usage before we get to the binding of
+the function.  Before we can collect the usage though, we go through
+all the bindings and add them to the environment. This is necessary
+because usage is only tracked for functions in the environment.
 
 The actual seeding of the specialisation is very similar to Note [Local recursive group].
 
@@ -423,27 +426,39 @@ But fspec doesn't have decent strictness info.  As it happened,
 and hence f.  But now f's strictness is less than its arity, which
 breaks an invariant.
 
-Note [SpecConstrAnnotation]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-SpecConstrAnnotation is defined in GHC.Exts, and is only guaranteed to
-be available in stage 2 (well, until the bootstrap compiler can be
-guaranteed to have it)
-
-So we define it to be () in stage1 (ie when GHCI is undefined), and
-'#ifdef' out the code that uses it.
-
-See also Note [Forcing specialisation]
 
 Note [Forcing specialisation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-With stream fusion and in other similar cases, we want to fully specialise
-some (but not necessarily all!) loops regardless of their size and the
-number of specialisations. We allow a library to specify this by annotating
-a type with ForceSpecConstr and then adding a parameter of that type to the
-loop. Here is a (simplified) example from the vector library:
+
+With stream fusion and in other similar cases, we want to fully
+specialise some (but not necessarily all!) loops regardless of their
+size and the number of specialisations.
+
+We allow a library to do this, in one of two ways (one which is
+deprecated):
+
+  1) Add a parameter of type GHC.Types.SPEC (from ghc-prim) to the loop body.
+
+  2) (Deprecated) Annotate a type with ForceSpecConstr from GHC.Exts,
+     and then add *that* type as a parameter to the loop body
+
+The reason #2 is deprecated is because it requires GHCi, which isn't
+available for things like a cross compiler using stage1.
+
+Here's a (simplified) example from the `vector` package. You may bring
+the special 'force specialization' type into scope by saying:
+
+  import GHC.Types (SPEC(..))
+
+or by defining your own type (again, deprecated):
 
   data SPEC = SPEC | SPEC2
   {-# ANN type SPEC ForceSpecConstr #-}
+
+(Note this is the exact same definition of GHC.Types.SPEC, just
+without the annotation.)
+
+After that, you say:
 
   foldl :: (a -> b -> a) -> a -> Stream b -> a
   {-# INLINE foldl #-}
@@ -493,12 +508,6 @@ or tuples here, (b) we don't want to restrict the set of types that
 can be used in Stream states and (c) some types are fixed by the user
 (e.g., the accumulator here) but we still want to specialise as much
 as possible.
-
-ForceSpecConstr is done by way of an annotation:
-  data SPEC = SPEC | SPEC2
-  {-# ANN type SPEC ForceSpecConstr #-}
-But SPEC is the *only* type so annotated, so it'd be better to
-use a particular library type.
 
 Alternatives to ForceSpecConstr
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -560,7 +569,7 @@ Note [NoSpecConstr]
 ~~~~~~~~~~~~~~~~~~~
 The ignoreDataCon stuff allows you to say
     {-# ANN type T NoSpecConstr #-}
-to mean "don't specialise on arguments of this type.  It was added
+to mean "don't specialise on arguments of this type".  It was added
 before we had ForceSpecConstr.  Lacking ForceSpecConstr we specialised
 regardless of size; and then we needed a way to turn that *off*.  Now
 that we have ForceSpecConstr, this NoSpecConstr is probably redundant.
@@ -906,15 +915,14 @@ decreaseSpecCount env n_specs
         -- See Note [Avoiding exponential blowup]
 
 ---------------------------------------------------
--- See Note [SpecConstrAnnotation]
+-- See Note [Forcing specialisation]
 ignoreType    :: ScEnv -> Type   -> Bool
 ignoreDataCon  :: ScEnv -> DataCon -> Bool
 forceSpecBndr :: ScEnv -> Var    -> Bool
+
 #ifndef GHCI
 ignoreType    _ _  = False
 ignoreDataCon  _ _ = False
-forceSpecBndr _ _  = False
-
 #else /* GHCI */
 
 ignoreDataCon env dc = ignoreTyCon env (dataConTyCon dc)
@@ -927,6 +935,7 @@ ignoreType env ty
 ignoreTyCon :: ScEnv -> TyCon -> Bool
 ignoreTyCon env tycon
   = lookupUFM (sc_annotations env) tycon == Just NoSpecConstr
+#endif /* GHCI */
 
 forceSpecBndr env var = forceSpecFunTy env . snd . splitForAllTys . varType $ var
 
@@ -940,11 +949,13 @@ forceSpecArgTy env ty
 forceSpecArgTy env ty
   | Just (tycon, tys) <- splitTyConApp_maybe ty
   , tycon /= funTyCon
-      = lookupUFM (sc_annotations env) tycon == Just ForceSpecConstr
+      = tyConName tycon == specTyConName
+#ifdef GHCI
+        || lookupUFM (sc_annotations env) tycon == Just ForceSpecConstr
+#endif
         || any (forceSpecArgTy env) tys
 
 forceSpecArgTy _ _ = False
-#endif /* GHCI */
 \end{code}
 
 Note [Add scrutinee to ValueEnv too]
@@ -1315,16 +1326,14 @@ scTopBind env usage (Rec prs)
   = do  { (rhs_usgs, rhss')   <- mapAndUnzipM (scExpr env) rhss
         ; return (usage `combineUsage` (combineUsages rhs_usgs), Rec (bndrs `zip` rhss')) }
   | otherwise   -- Do specialisation
-  = do  { (rhs_usgs, rhs_infos) <- mapAndUnzipM (scRecRhs env) (bndrs `zip` rhss)
+  = do  { (rhs_usgs, rhs_infos) <- mapAndUnzipM (scRecRhs env) prs
         -- ; pprTrace "scTopBind" (ppr bndrs $$ ppr (map (lookupVarEnv (scu_calls usage)) bndrs)) (return ())
 
         -- Note [Top-level recursive groups]
-        ; let (usg,rest) = if   all (not . isExportedId) bndrs
-                           then -- pprTrace "scTopBind-T" (ppr bndrs $$ ppr (map (fmap (map snd) . lookupVarEnv (scu_calls usage)) bndrs))
-                                ( usage
-                                , [SI [] 0 (Just us) | us <- rhs_usgs] )
-                           else ( combineUsages rhs_usgs
-                                , [SI [] 0 Nothing   | _  <- rhs_usgs] )
+        ; let (usg,rest) | any isExportedId bndrs  -- Seed from RHSs
+                         = ( combineUsages rhs_usgs, [SI [] 0 Nothing   | _  <- rhs_usgs] )
+                         | otherwise               -- Seed from body only
+                         = ( usage,                  [SI [] 0 (Just us) | us <- rhs_usgs] )
 
         ; (usage', specs) <- specLoop (scForce env force_spec)
                                  (scu_calls usg) rhs_infos nullUsage rest
@@ -1438,11 +1447,6 @@ specialise env bind_calls (RI fn _ arg_bndrs body arg_occs)
   , notNull arg_bndrs           -- Only specialise functions
   , Just all_calls <- lookupVarEnv bind_calls fn
   = do  { (boring_call, pats) <- callsToPats env specs arg_occs all_calls
---      ; pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int (length pats) <+> text "good patterns"
---                                      , text "arg_occs" <+> ppr arg_occs
---                                    , text "calls" <+> ppr all_calls
---                                    , text "good pats" <+> ppr pats])  $
---        return ()
 
                 -- Bale out if too many specialisations
         ; let n_pats      = length pats
@@ -1465,12 +1469,25 @@ specialise env bind_calls (RI fn _ arg_bndrs body arg_occs)
 
             _normal_case -> do {
 
-          let spec_env = decreaseSpecCount env n_pats
+--        ; if (not (null pats) || isJust mb_unspec) then
+--            pprTrace "specialise" (vcat [ ppr fn <+> text "with" <+> int (length pats) <+> text "good patterns"
+--                                        , text "mb_unspec" <+> ppr (isJust mb_unspec)
+--                                        , text "arg_occs" <+> ppr arg_occs
+--                                        , text "good pats" <+> ppr pats])  $
+--               return ()
+--          else return ()
+
+        ; let spec_env = decreaseSpecCount env n_pats
         ; (spec_usgs, new_specs) <- mapAndUnzipM (spec_one spec_env fn arg_bndrs body)
                                                  (pats `zip` [spec_count..])
                 -- See Note [Specialise original body]
 
         ; let spec_usg = combineUsages spec_usgs
+
+              -- If there were any boring calls among the seeds (= all_calls), then those
+              -- calls will call the un-specialised function.  So we should use the seeds
+              -- from the _unspecialised_ function's RHS, which are in mb_unspec, by returning
+              -- then in new_usg.
               (new_usg, mb_unspec')
                   = case mb_unspec of
                       Just rhs_usg | boring_call -> (spec_usg `combineUsage` rhs_usg, Nothing)
@@ -1541,7 +1558,7 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
                              `setIdArity` count isId spec_lam_args
               spec_str   = calcSpecStrictness fn spec_lam_args pats
                 -- Conditionally use result of new worker-wrapper transform
-              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars False body_ty
+              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars NoOneShotInfo body_ty
                 -- Usual w/w hack to avoid generating 
                 -- a spec_rhs of unlifted type and no args
 
@@ -1559,7 +1576,7 @@ calcSpecStrictness :: Id                     -- The original function
                    -> StrictSig              -- Strictness of specialised thing
 -- See Note [Transfer strictness]
 calcSpecStrictness fn qvars pats
-  = StrictSig (mkTopDmdType spec_dmds topRes)
+  = mkClosedStrictSig spec_dmds topRes
   where
     spec_dmds = [ lookupVarEnv dmd_env qv `orElse` topDmd | qv <- qvars, isId qv ]
     StrictSig (DmdType _ dmds _) = idStrictness fn

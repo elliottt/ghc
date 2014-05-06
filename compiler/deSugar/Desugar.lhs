@@ -17,9 +17,12 @@ import MkIface
 import Id
 import Name
 import Type
+import FamInstEnv
+import Coercion
 import InstEnv
 import Class
 import Avail
+import PatSyn
 import CoreSyn
 import CoreSubst
 import PprCore
@@ -28,12 +31,14 @@ import DsExpr
 import DsBinds
 import DsForeign
 import Module
-import RdrName
 import NameSet
 import NameEnv
 import Rules
+import TysPrim (eqReprPrimTyCon)
+import TysWiredIn (coercibleTyCon )
 import BasicTypes       ( Activation(.. ) )
 import CoreMonad        ( endPass, CoreToDo(..) )
+import MkCore
 import FastString
 import ErrUtils
 import Outputable
@@ -45,6 +50,8 @@ import OrdList
 import Data.List
 import Data.IORef
 import Control.Monad( when )
+import Data.Maybe ( mapMaybe )
+import UniqFM
 \end{code}
 
 %************************************************************************
@@ -80,6 +87,7 @@ deSugar hsc_env
                             tcg_fords        = fords,
                             tcg_rules        = rules,
                             tcg_vects        = vects,
+                            tcg_patsyns      = patsyns,
                             tcg_tcs          = tcs,
                             tcg_insts        = insts,
                             tcg_fam_insts    = fam_insts,
@@ -90,24 +98,22 @@ deSugar hsc_env
 
         -- Desugar the program
         ; let export_set = availsToNameSet exports
-        ; let target = hscTarget dflags
-        ; let hpcInfo = emptyHpcInfo other_hpc_info
-        ; (msgs, mb_res) <- do
+              target     = hscTarget dflags
+              hpcInfo    = emptyHpcInfo other_hpc_info
+              want_ticks = gopt Opt_Hpc dflags
+                        || target == HscInterpreted
+                        || (gopt Opt_SccProfilingOn dflags
+                            && case profAuto dflags of
+                                 NoProfAuto -> False
+                                 _          -> True)
 
-                     let want_ticks = gopt Opt_Hpc dflags
-                                   || target == HscInterpreted
-                                   || (gopt Opt_SccProfilingOn dflags
-                                       && case profAuto dflags of
-                                            NoProfAuto -> False
-                                            _          -> True)
-
-                     (binds_cvr,ds_hpc_info, modBreaks)
+        ; (binds_cvr, ds_hpc_info, modBreaks)
                          <- if want_ticks && not (isHsBoot hsc_src)
                               then addTicksToBinds dflags mod mod_loc export_set
                                           (typeEnvTyCons type_env) binds
                               else return (binds, hpcInfo, emptyModBreaks)
 
-                     initDs hsc_env mod rdr_env type_env $ do
+        ; (msgs, mb_res) <- initDs hsc_env mod rdr_env type_env fam_inst_env $
                        do { ds_ev_binds <- dsEvBinds ev_binds
                           ; core_prs <- dsTopLHsBinds binds_cvr
                           ; (spec_prs, spec_rules) <- dsImpSpecs imp_specs
@@ -117,22 +123,27 @@ deSugar hsc_env
                           ; let hpc_init
                                   | gopt Opt_Hpc dflags = hpcInitCode mod ds_hpc_info
                                   | otherwise = empty
+                          ; let patsyn_defs = [(patSynId ps, ps) | ps <- patsyns]
                           ; return ( ds_ev_binds
                                    , foreign_prs `appOL` core_prs `appOL` spec_prs
                                    , spec_rules ++ ds_rules, ds_vects
                                    , ds_fords `appendStubC` hpc_init
-                                   , ds_hpc_info, modBreaks) }
+                                   , patsyn_defs) }
 
         ; case mb_res of {
            Nothing -> return (msgs, Nothing) ;
-           Just (ds_ev_binds, all_prs, all_rules, vects0, ds_fords, ds_hpc_info, modBreaks) -> do
+           Just (ds_ev_binds, all_prs, all_rules, vects0, ds_fords, patsyn_defs) -> do
 
-        {       -- Add export flags to bindings
+     do {       -- Add export flags to bindings
           keep_alive <- readIORef keep_var
         ; let (rules_for_locals, rules_for_imps)
                    = partition isLocalRule all_rules
+              final_patsyns = addExportFlagsAndRules target export_set keep_alive [] patsyn_defs
+              exp_patsyn_wrappers = mapMaybe (patSynWrapper . snd) final_patsyns
+              exp_patsyn_matchers = map (patSynMatcher . snd) final_patsyns
+              keep_alive' = addListToUFM keep_alive (map (\x -> (x, getName x)) (exp_patsyn_wrappers ++ exp_patsyn_matchers))
               final_prs = addExportFlagsAndRules target
-                              export_set keep_alive rules_for_locals (fromOL all_prs)
+                              export_set keep_alive' rules_for_locals (fromOL all_prs)
 
               final_pgm = combineEvBinds ds_ev_binds final_prs
         -- Notice that we put the whole lot in a big Rec, even the foreign binds
@@ -143,14 +154,14 @@ deSugar hsc_env
 
 #ifdef DEBUG
           -- Debug only as pre-simple-optimisation program may be really big
-        ; endPass dflags CoreDesugar final_pgm rules_for_imps
+        ; endPass hsc_env CoreDesugar final_pgm rules_for_imps
 #endif
         ; (ds_binds, ds_rules_for_imps, ds_vects)
             <- simpleOptPgm dflags mod final_pgm rules_for_imps vects0
                          -- The simpleOptPgm gets rid of type
                          -- bindings plus any stupid dead code
 
-        ; endPass dflags CoreDesugarOpt ds_binds ds_rules_for_imps
+        ; endPass hsc_env CoreDesugarOpt ds_binds ds_rules_for_imps
 
         ; let used_names = mkUsedNames tcg_env
         ; deps <- mkDependencies tcg_env
@@ -176,6 +187,7 @@ deSugar hsc_env
                 mg_fam_insts    = fam_insts,
                 mg_inst_env     = inst_env,
                 mg_fam_inst_env = fam_inst_env,
+                mg_patsyns      = map snd . filter (isExportedId . fst) $ final_patsyns,
                 mg_rules        = ds_rules_for_imps,
                 mg_binds        = ds_binds,
                 mg_foreign      = ds_fords,
@@ -220,28 +232,29 @@ and Rec the rest.
 
 
 \begin{code}
-deSugarExpr :: HscEnv
-            -> Module -> GlobalRdrEnv -> TypeEnv
-            -> LHsExpr Id
-            -> IO (Messages, Maybe CoreExpr)
--- Prints its own errors; returns Nothing if error occurred
+deSugarExpr :: HscEnv -> LHsExpr Id -> IO (Messages, Maybe CoreExpr)
 
-deSugarExpr hsc_env this_mod rdr_env type_env tc_expr = do
-    let dflags = hsc_dflags hsc_env
-    showPass dflags "Desugar"
+deSugarExpr hsc_env tc_expr
+  = do { let dflags       = hsc_dflags hsc_env
+             icntxt       = hsc_IC hsc_env
+             rdr_env      = ic_rn_gbl_env icntxt
+             type_env     = mkTypeEnvWithImplicits (ic_tythings icntxt)
+             fam_insts    = snd (ic_instances icntxt)
+             fam_inst_env = extendFamInstEnvList emptyFamInstEnv fam_insts
+             -- This stuff is a half baked version of TcRnDriver.setInteractiveContext
 
-    -- Do desugaring
-    (msgs, mb_core_expr) <- initDs hsc_env this_mod rdr_env type_env $
-                                   dsLExpr tc_expr
+       ; showPass dflags "Desugar"
 
-    case mb_core_expr of
-      Nothing   -> return (msgs, Nothing)
-      Just expr -> do
+         -- Do desugaring
+       ; (msgs, mb_core_expr) <- initDs hsc_env (icInteractiveModule icntxt) rdr_env
+                                        type_env fam_inst_env $
+                                 dsLExpr tc_expr
 
-        -- Dump output
-        dumpIfSet_dyn dflags Opt_D_dump_ds "Desugared" (pprCoreExpr expr)
+       ; case mb_core_expr of
+            Nothing   -> return ()
+            Just expr -> dumpIfSet_dyn dflags Opt_D_dump_ds "Desugared" (pprCoreExpr expr)
 
-        return (msgs, Just expr)
+       ; return (msgs, mb_core_expr) }
 \end{code}
 
 %************************************************************************
@@ -338,6 +351,7 @@ Reason
 %************************************************************************
 
 \begin{code}
+
 dsRule :: LRuleDecl Id -> DsM (Maybe CoreRule)
 dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
   = putSrcSpanDs loc $
@@ -350,9 +364,11 @@ dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
         ; rhs' <- dsLExpr rhs
         ; dflags <- getDynFlags
 
+        ; (bndrs'', lhs'', rhs'') <- unfold_coerce bndrs' lhs' rhs'
+
         -- Substitute the dict bindings eagerly,
         -- and take the body apart into a (f args) form
-        ; case decomposeRuleLhs bndrs' lhs' of {
+        ; case decomposeRuleLhs bndrs'' lhs'' of {
                 Left msg -> do { warnDs msg; return Nothing } ;
                 Right (final_bndrs, fn_id, args) -> do
 
@@ -361,12 +377,14 @@ dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
                 -- we don't want to attach rules to the bindings of implicit Ids,
                 -- because they don't show up in the bindings until just before code gen
               fn_name   = idName fn_id
-              final_rhs = simpleOptExpr rhs'    -- De-crap it
+              final_rhs = simpleOptExpr rhs''    -- De-crap it
               rule      = mkRule False {- Not auto -} is_local
                                  name act fn_name final_bndrs args final_rhs
 
               inline_shadows_rule   -- Function can be inlined before rule fires
                 | wopt Opt_WarnInlineRuleShadowing dflags
+                , isLocalId fn_id || hasSomeUnfolding (idUnfolding fn_id)   
+                       -- If imported with no unfolding, no worries
                 = case (idInlineActivation fn_id, act) of
                     (NeverActive, _)    -> False
                     (AlwaysActive, _)   -> True
@@ -387,6 +405,27 @@ dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
 
         ; return (Just rule)
         } } }
+
+-- See Note [Desugaring coerce as cast]
+unfold_coerce :: [Id] -> CoreExpr -> CoreExpr -> DsM ([Var], CoreExpr, CoreExpr)
+unfold_coerce bndrs lhs rhs = do
+    (bndrs', wrap) <- go bndrs
+    return (bndrs', wrap lhs, wrap rhs)
+  where
+    go :: [Id] -> DsM ([Id], CoreExpr -> CoreExpr)
+    go []     = return ([], id)
+    go (v:vs)
+        | Just (tc, args) <- splitTyConApp_maybe (idType v)
+        , tc == coercibleTyCon = do
+            let ty' = mkTyConApp eqReprPrimTyCon args
+            v' <- mkDerivedLocalM mkRepEqOcc v ty'
+
+            (bndrs, wrap) <- go vs
+            return (v':bndrs, mkCoreLet (NonRec v (mkEqBox (mkCoVarCo v'))) . wrap)
+        | otherwise = do
+            (bndrs,wrap) <- go vs
+            return (v:bndrs, wrap)
+
 \end{code}
 
 Note [Desugaring RULE left hand sides]
@@ -405,6 +444,20 @@ Nor do we want to warn of conversion identities on the LHS;
 the rule is precisly to optimise them:
   {-# RULES "fromRational/id" fromRational = id :: Rational -> Rational #-}
 
+
+Note [Desugaring coerce as cast]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We want the user to express a rule saying roughly “mapping a coercion over a
+list can be replaced by a coercion”. But the cast operator of Core (▷) cannot
+be written in Haskell. So we use `coerce` for that (#2110). The user writes
+    map coerce = coerce
+as a RULE, and this optimizes any kind of mapped' casts aways, including `map
+MkNewtype`.
+
+For that we replace any forall'ed `c :: Coercible a b` value in a RULE by
+corresponding `co :: a ~#R b` and wrap the LHS and the RHS in
+`let c = MkCoercible co in ...`. This is later simplified to the desired form
+by simpleOptExpr (for the LHS) resp. the simplifiers (for the RHS).
 
 %************************************************************************
 %*                                                                      *

@@ -28,7 +28,6 @@ import DataCon
 import CostCentre       ( noCCS )
 import VarSet
 import VarEnv
-import Maybes           ( maybeToBool )
 import Module
 import Name             ( getOccName, isExternalName, nameOccName )
 import OccName          ( occNameString, occNameFS )
@@ -43,6 +42,9 @@ import DynFlags
 import ForeignCall
 import Demand           ( isSingleUsed )
 import PrimOp           ( PrimCall(..) )
+
+import Data.Maybe    (isJust)
+import Control.Monad (liftM, ap)
 
 -- Note [Live vs free]
 -- ~~~~~~~~~~~~~~~~~~~
@@ -142,7 +144,8 @@ import PrimOp           ( PrimCall(..) )
 -- to the code for `x'.
 --
 -- All of this is provided x is:
---   1. non-updatable;
+--   1. non-updatable - it must have at least one parameter (see Note
+--      [Join point abstraction]);
 --   2. guaranteed to be entered before the stack retreats -- ie x is not
 --      buried in a heap-allocated closure, or passed as an argument to
 --      something;
@@ -982,6 +985,13 @@ thenLne :: LneM a -> (a -> LneM b) -> LneM b
 thenLne m k = LneM $ \env lvs_cont
   -> unLneM (k (unLneM m env lvs_cont)) env lvs_cont
 
+instance Functor LneM where
+    fmap = liftM
+
+instance Applicative LneM where
+    pure = return
+    (<*>) = ap
+
 instance Monad LneM where
     return = returnLne
     (>>=)  = thenLne
@@ -1066,7 +1076,7 @@ type FreeVarsInfo = VarEnv (Var, HowBound, StgBinderInfo)
         --
         -- All case/lambda-bound things are also mapped to
         -- noBinderInfo, since we aren't interested in their
-        -- occurence info.
+        -- occurrence info.
         --
         -- For ILX we track free var info for type variables too;
         -- hence VarEnv not IdEnv
@@ -1096,7 +1106,7 @@ minusFVBinder v fv = fv `delVarEnv` v
         -- c.f. CoreFVs.delBinderFV
 
 elementOfFVInfo :: Id -> FreeVarsInfo -> Bool
-elementOfFVInfo id fvs = maybeToBool (lookupVarEnv fvs id)
+elementOfFVInfo id fvs = isJust (lookupVarEnv fvs id)
 
 lookupFVInfo :: FreeVarsInfo -> Id -> StgBinderInfo
 -- Find how the given Id is used.

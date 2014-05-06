@@ -48,6 +48,7 @@ module TyCon(
         isFamilyTyCon, isOpenFamilyTyCon,
         isSynFamilyTyCon, isDataFamilyTyCon,
         isOpenSynFamilyTyCon, isClosedSynFamilyTyCon_maybe,
+        isBuiltInSynFamTyCon_maybe,
         isUnLiftedTyCon,
         isGadtSyntaxTyCon, isDistinctTyCon, isDistinctAlgRhs,
         isTyConAssoc, tyConAssoc_maybe,
@@ -72,7 +73,7 @@ module TyCon(
         synTyConDefn_maybe, synTyConRhs_maybe, 
         tyConExtName,           -- External name for foreign types
         algTyConRhs,
-        newTyConRhs, newTyConEtadRhs, unwrapNewTyCon_maybe,
+        newTyConRhs, newTyConEtadArity, newTyConEtadRhs, unwrapNewTyCon_maybe,
         tupleTyConBoxity, tupleTyConSort, tupleTyConArity,
 
         -- ** Manipulating TyCons
@@ -83,11 +84,12 @@ module TyCon(
 
         -- * Primitive representations of Types
         PrimRep(..), PrimElemRep(..),
-        tyConPrimRep,
+        tyConPrimRep, isVoidRep, isGcPtrRep,
         primRepSizeW, primElemRepSizeB,
 
         -- * Recursion breaking
         RecTcChecker, initRecTc, checkRecTc
+
 ) where
 
 #include "HsVersions.h"
@@ -277,11 +279,12 @@ Note [TyCon Role signatures]
 
 Every tycon has a role signature, assigning a role to each of the tyConTyVars
 (or of equal length to the tyConArity, if there are no tyConTyVars). An
-example demonstrates these best: say we have a tycon T, with parameters a@N,
-b@R, and c@P. Then, to prove representational equality between T a1 b1 c1 and
-T a2 b2 c2, we need to have nominal equality between a1 and a2, representational
-equality between b1 and b2, and nothing in particular (i.e., phantom equality)
-between c1 and c2. This might happen, say, with the following declaration:
+example demonstrates these best: say we have a tycon T, with parameters a at
+nominal, b at representational, and c at phantom. Then, to prove
+representational equality between T a1 b1 c1 and T a2 b2 c2, we need to have
+nominal equality between a1 and a2, representational equality between b1 and
+b2, and nothing in particular (i.e., phantom equality) between c1 and c2. This
+might happen, say, with the following declaration:
 
   data T a b c where
     MkT :: b -> T Int b c
@@ -628,6 +631,8 @@ data SynTyConRhs
    -- | A closed type synonym family declared in an hs-boot file with
    -- type family F a where ..
    | AbstractClosedSynFamilyTyCon
+
+   | BuiltInSynFamTyCon BuiltInSynFamily
 \end{code}
 
 Note [Closed type families]
@@ -851,6 +856,14 @@ instance Outputable PrimRep where
 
 instance Outputable PrimElemRep where
   ppr r = text (show r)
+
+isVoidRep :: PrimRep -> Bool
+isVoidRep VoidRep = True
+isVoidRep _other  = False
+
+isGcPtrRep :: PrimRep -> Bool
+isGcPtrRep PtrRep = True
+isGcPtrRep _      = False
 
 -- | Find the size of a 'PrimRep', in words
 primRepSizeW :: DynFlags -> PrimRep -> Int
@@ -1207,6 +1220,7 @@ isFamilyTyCon :: TyCon -> Bool
 isFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon })              = True
 isFamilyTyCon (SynTyCon {synTcRhs = ClosedSynFamilyTyCon {} })         = True
 isFamilyTyCon (SynTyCon {synTcRhs = AbstractClosedSynFamilyTyCon {} }) = True
+isFamilyTyCon (SynTyCon {synTcRhs = BuiltInSynFamTyCon {} })           = True
 isFamilyTyCon (AlgTyCon {algTcRhs = DataFamilyTyCon {}})               = True
 isFamilyTyCon _ = False
 
@@ -1222,6 +1236,7 @@ isSynFamilyTyCon :: TyCon -> Bool
 isSynFamilyTyCon (SynTyCon {synTcRhs = OpenSynFamilyTyCon {}})           = True
 isSynFamilyTyCon (SynTyCon {synTcRhs = ClosedSynFamilyTyCon {}})         = True
 isSynFamilyTyCon (SynTyCon {synTcRhs = AbstractClosedSynFamilyTyCon {}}) = True
+isSynFamilyTyCon (SynTyCon {synTcRhs = BuiltInSynFamTyCon {}})           = True
 isSynFamilyTyCon _ = False
 
 isOpenSynFamilyTyCon :: TyCon -> Bool
@@ -1233,6 +1248,11 @@ isClosedSynFamilyTyCon_maybe :: TyCon -> Maybe (CoAxiom Branched)
 isClosedSynFamilyTyCon_maybe
   (SynTyCon {synTcRhs = ClosedSynFamilyTyCon ax}) = Just ax
 isClosedSynFamilyTyCon_maybe _ = Nothing
+
+isBuiltInSynFamTyCon_maybe :: TyCon -> Maybe BuiltInSynFamily
+isBuiltInSynFamTyCon_maybe
+  SynTyCon {synTcRhs = BuiltInSynFamTyCon ops } = Just ops
+isBuiltInSynFamTyCon_maybe _ = Nothing
 
 -- | Is this a synonym 'TyCon' that can have may have further instances appear?
 isDataFamilyTyCon :: TyCon -> Bool
@@ -1467,6 +1487,12 @@ tyConRoles tc
 newTyConRhs :: TyCon -> ([TyVar], Type)
 newTyConRhs (AlgTyCon {tyConTyVars = tvs, algTcRhs = NewTyCon { nt_rhs = rhs }}) = (tvs, rhs)
 newTyConRhs tycon = pprPanic "newTyConRhs" (ppr tycon)
+
+-- | The number of type parameters that need to be passed to a newtype to resolve it. May be less than in the definition if it can be eta-contracted.
+newTyConEtadArity :: TyCon -> Int
+newTyConEtadArity (AlgTyCon {algTcRhs = NewTyCon { nt_etad_rhs = tvs_rhs }})
+        = length (fst tvs_rhs)
+newTyConEtadArity tycon = pprPanic "newTyConEtadArity" (ppr tycon)
 
 -- | Extract the bound type variables and type expansion of an eta-contracted type synonym 'TyCon'.
 -- Panics if the 'TyCon' is not a synonym

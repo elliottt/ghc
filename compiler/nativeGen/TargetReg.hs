@@ -3,7 +3,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | Hard wired things related to registers.
@@ -54,10 +54,13 @@ targetVirtualRegSqueeze platform
       ArchSPARC     -> SPARC.virtualRegSqueeze
       ArchPPC_64    -> panic "targetVirtualRegSqueeze ArchPPC_64"
       ArchARM _ _ _ -> panic "targetVirtualRegSqueeze ArchARM"
+      ArchARM64     -> panic "targetVirtualRegSqueeze ArchARM64"
       ArchAlpha     -> panic "targetVirtualRegSqueeze ArchAlpha"
       ArchMipseb    -> panic "targetVirtualRegSqueeze ArchMipseb"
       ArchMipsel    -> panic "targetVirtualRegSqueeze ArchMipsel"
+      ArchJavaScript-> panic "targetVirtualRegSqueeze ArchJavaScript"
       ArchUnknown   -> panic "targetVirtualRegSqueeze ArchUnknown"
+
 
 targetRealRegSqueeze :: Platform -> RegClass -> RealReg -> FastInt
 targetRealRegSqueeze platform
@@ -68,9 +71,11 @@ targetRealRegSqueeze platform
       ArchSPARC     -> SPARC.realRegSqueeze
       ArchPPC_64    -> panic "targetRealRegSqueeze ArchPPC_64"
       ArchARM _ _ _ -> panic "targetRealRegSqueeze ArchARM"
+      ArchARM64     -> panic "targetRealRegSqueeze ArchARM64"
       ArchAlpha     -> panic "targetRealRegSqueeze ArchAlpha"
       ArchMipseb    -> panic "targetRealRegSqueeze ArchMipseb"
       ArchMipsel    -> panic "targetRealRegSqueeze ArchMipsel"
+      ArchJavaScript-> panic "targetRealRegSqueeze ArchJavaScript"
       ArchUnknown   -> panic "targetRealRegSqueeze ArchUnknown"
 
 targetClassOfRealReg :: Platform -> RealReg -> RegClass
@@ -82,9 +87,11 @@ targetClassOfRealReg platform
       ArchSPARC     -> SPARC.classOfRealReg
       ArchPPC_64    -> panic "targetClassOfRealReg ArchPPC_64"
       ArchARM _ _ _ -> panic "targetClassOfRealReg ArchARM"
+      ArchARM64     -> panic "targetClassOfRealReg ArchARM64"
       ArchAlpha     -> panic "targetClassOfRealReg ArchAlpha"
       ArchMipseb    -> panic "targetClassOfRealReg ArchMipseb"
       ArchMipsel    -> panic "targetClassOfRealReg ArchMipsel"
+      ArchJavaScript-> panic "targetClassOfRealReg ArchJavaScript"
       ArchUnknown   -> panic "targetClassOfRealReg ArchUnknown"
 
 targetMkVirtualReg :: Platform -> Unique -> Size -> VirtualReg
@@ -96,9 +103,11 @@ targetMkVirtualReg platform
       ArchSPARC     -> SPARC.mkVirtualReg
       ArchPPC_64    -> panic "targetMkVirtualReg ArchPPC_64"
       ArchARM _ _ _ -> panic "targetMkVirtualReg ArchARM"
+      ArchARM64     -> panic "targetMkVirtualReg ArchARM64"
       ArchAlpha     -> panic "targetMkVirtualReg ArchAlpha"
       ArchMipseb    -> panic "targetMkVirtualReg ArchMipseb"
       ArchMipsel    -> panic "targetMkVirtualReg ArchMipsel"
+      ArchJavaScript-> panic "targetMkVirtualReg ArchJavaScript"
       ArchUnknown   -> panic "targetMkVirtualReg ArchUnknown"
 
 targetRegDotColor :: Platform -> RealReg -> SDoc
@@ -110,9 +119,11 @@ targetRegDotColor platform
       ArchSPARC     -> SPARC.regDotColor
       ArchPPC_64    -> panic "targetRegDotColor ArchPPC_64"
       ArchARM _ _ _ -> panic "targetRegDotColor ArchARM"
+      ArchARM64     -> panic "targetRegDotColor ArchARM64"
       ArchAlpha     -> panic "targetRegDotColor ArchAlpha"
       ArchMipseb    -> panic "targetRegDotColor ArchMipseb"
       ArchMipsel    -> panic "targetRegDotColor ArchMipsel"
+      ArchJavaScript-> panic "targetRegDotColor ArchJavaScript"
       ArchUnknown   -> panic "targetRegDotColor ArchUnknown"
 
 

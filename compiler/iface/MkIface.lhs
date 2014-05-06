@@ -32,7 +32,7 @@ module MkIface (
 A complete description of how recompilation checking works can be
 found in the wiki commentary:
 
- http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
+ http://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
 
 Please read the above page for a top-down description of how this all
 works.  Notes below cover specific issues related to the implementation.
@@ -73,7 +73,9 @@ import Class
 import Kind
 import TyCon
 import CoAxiom
+import ConLike
 import DataCon
+import PatSyn
 import Type
 import TcType
 import InstEnv
@@ -273,6 +275,7 @@ mkIface_ hsc_env maybe_old_fingerprint
         iface_fam_insts = map famInstToIfaceFamInst fam_insts
         iface_vect_info = flattenVectInfo vect_info
         trust_info  = setSafeMode safe_mode
+        annotations = map mkIfaceAnnotation anns
 
         intermediate_iface = ModIface {
               mi_module      = this_mod,
@@ -291,7 +294,7 @@ mkIface_ hsc_env maybe_old_fingerprint
 
               mi_fixities    = fixities,
               mi_warns       = warns,
-              mi_anns        = mkIfaceAnnotations anns,
+              mi_anns        = annotations,
               mi_globals     = maybeGlobalRdrEnv rdr_env,
 
               -- Left out deliberately: filled in by addFingerprints
@@ -441,7 +444,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
         -- see IfaceDeclABI below.
        declABI :: IfaceDecl -> IfaceDeclABI
        declABI decl = (this_mod, decl, extras)
-        where extras = declExtras fix_fn non_orph_rules non_orph_insts
+        where extras = declExtras fix_fn ann_fn non_orph_rules non_orph_insts
                                   non_orph_fis decl
 
        edges :: [(IfaceDeclABI, Unique, [Unique])]
@@ -597,11 +600,13 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 
    -- The interface hash depends on:
    --   - the ABI hash, plus
+   --   - the module level annotations,
    --   - usages
    --   - deps (home and external packages, dependent files)
    --   - hpc
    iface_hash <- computeFingerprint putNameLiterally
                       (mod_hash,
+                       ann_fn (mkVarOcc "module"),  -- See mkIfaceAnnCache
                        mi_usages iface0,
                        sorted_deps,
                        mi_hpc iface0)
@@ -633,7 +638,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
     (non_orph_rules, orph_rules) = mkOrphMap ifRuleOrph    (mi_rules iface0)
     (non_orph_fis,   orph_fis)   = mkOrphMap ifFamInstOrph (mi_fam_insts iface0)
     fix_fn = mi_fix_fn iface0
-
+    ann_fn = mkIfaceAnnCache (mi_anns iface0)
 
 getOrphanHashes :: HscEnv -> [Module] -> IO [Fingerprint]
 getOrphanHashes hsc_env mods = do
@@ -659,6 +664,22 @@ sortDependencies d
 \end{code}
 
 
+\begin{code}
+-- | Creates cached lookup for the 'mi_anns' field of ModIface
+-- Hackily, we use "module" as the OccName for any module-level annotations
+mkIfaceAnnCache :: [IfaceAnnotation] -> OccName -> [AnnPayload]
+mkIfaceAnnCache anns
+  = \n -> lookupOccEnv env n `orElse` []
+  where
+    pair (IfaceAnnotation target value) =
+      (case target of
+          NamedTarget occn -> occn
+          ModuleTarget _   -> mkVarOcc "module"
+      , [value])
+    -- flipping (++), so the first argument is always short
+    env = mkOccEnv_C (flip (++)) (map pair anns)
+\end{code}
+
 %************************************************************************
 %*                                                                      *
           The ABI of an IfaceDecl
@@ -675,7 +696,7 @@ The ABI of a declaration consists of:
 
    (b) the declaration itself, as exposed to clients.  That is, the
        definition of an Id is included in the fingerprint only if
-       it is made available as as unfolding in the interface.
+       it is made available as an unfolding in the interface.
 
    (c) the fixity of the identifier
    (d) for Ids: rules
@@ -691,24 +712,32 @@ and fingerprinting that as part of the declaration.
 type IfaceDeclABI = (Module, IfaceDecl, IfaceDeclExtras)
 
 data IfaceDeclExtras
-  = IfaceIdExtras    Fixity [IfaceRule]
+  = IfaceIdExtras IfaceIdExtras
 
   | IfaceDataExtras
        Fixity                   -- Fixity of the tycon itself
        [IfaceInstABI]           -- Local class and family instances of this tycon
                                 -- See Note [Orphans] in IfaceSyn
-       [(Fixity,[IfaceRule])]   -- For each construcotr, fixity and RULES
+       [AnnPayload]             -- Annotations of the type itself
+       [IfaceIdExtras]          -- For each constructor: fixity, RULES and annotations
 
   | IfaceClassExtras
        Fixity                   -- Fixity of the class itself
        [IfaceInstABI]           -- Local instances of this class *or*
                                 --   of its associated data types
                                 -- See Note [Orphans] in IfaceSyn
-       [(Fixity,[IfaceRule])]   -- For each class method, fixity and RULES
+       [AnnPayload]             -- Annotations of the type itself
+       [IfaceIdExtras]          -- For each class method: fixity, RULES and annotations
 
-  | IfaceSynExtras   Fixity [IfaceInstABI]
+  | IfaceSynExtras   Fixity [IfaceInstABI] [AnnPayload]
 
   | IfaceOtherDeclExtras
+
+data IfaceIdExtras
+  = IdExtras
+       Fixity                   -- Fixity of the Id
+       [IfaceRule]              -- Rules for the Id
+       [AnnPayload]             -- Annotations for the Id
 
 -- When hashing a class or family instance, we hash only the
 -- DFunId or CoAxiom, because that depends on all the
@@ -728,67 +757,71 @@ freeNamesDeclABI (_mod, decl, extras) =
   freeNamesIfDecl decl `unionNameSets` freeNamesDeclExtras extras
 
 freeNamesDeclExtras :: IfaceDeclExtras -> NameSet
-freeNamesDeclExtras (IfaceIdExtras    _ rules)
-  = unionManyNameSets (map freeNamesIfRule rules)
-freeNamesDeclExtras (IfaceDataExtras  _ insts subs)
-  = unionManyNameSets (mkNameSet insts : map freeNamesSub subs)
-freeNamesDeclExtras (IfaceClassExtras _ insts subs)
-  = unionManyNameSets (mkNameSet insts : map freeNamesSub subs)
-freeNamesDeclExtras (IfaceSynExtras _ insts)
+freeNamesDeclExtras (IfaceIdExtras id_extras)
+  = freeNamesIdExtras id_extras
+freeNamesDeclExtras (IfaceDataExtras  _ insts _ subs)
+  = unionManyNameSets (mkNameSet insts : map freeNamesIdExtras subs)
+freeNamesDeclExtras (IfaceClassExtras _ insts _ subs)
+  = unionManyNameSets (mkNameSet insts : map freeNamesIdExtras subs)
+freeNamesDeclExtras (IfaceSynExtras _ insts _)
   = mkNameSet insts
 freeNamesDeclExtras IfaceOtherDeclExtras
   = emptyNameSet
 
-freeNamesSub :: (Fixity,[IfaceRule]) -> NameSet
-freeNamesSub (_,rules) = unionManyNameSets (map freeNamesIfRule rules)
+freeNamesIdExtras :: IfaceIdExtras -> NameSet
+freeNamesIdExtras (IdExtras _ rules _) = unionManyNameSets (map freeNamesIfRule rules)
 
 instance Outputable IfaceDeclExtras where
   ppr IfaceOtherDeclExtras       = empty
-  ppr (IfaceIdExtras  fix rules) = ppr_id_extras fix rules
-  ppr (IfaceSynExtras fix finsts) = vcat [ppr fix, ppr finsts]
-  ppr (IfaceDataExtras fix insts stuff) = vcat [ppr fix, ppr_insts insts,
+  ppr (IfaceIdExtras  extras)    = ppr_id_extras extras
+  ppr (IfaceSynExtras fix finsts anns) = vcat [ppr fix, ppr finsts, ppr anns]
+  ppr (IfaceDataExtras fix insts anns stuff) = vcat [ppr fix, ppr_insts insts, ppr anns,
                                                 ppr_id_extras_s stuff]
-  ppr (IfaceClassExtras fix insts stuff) = vcat [ppr fix, ppr_insts insts,
+  ppr (IfaceClassExtras fix insts anns stuff) = vcat [ppr fix, ppr_insts insts, ppr anns,
                                                  ppr_id_extras_s stuff]
 
 ppr_insts :: [IfaceInstABI] -> SDoc
 ppr_insts _ = ptext (sLit "<insts>")
 
-ppr_id_extras_s :: [(Fixity, [IfaceRule])] -> SDoc
-ppr_id_extras_s stuff = vcat [ppr_id_extras f r | (f,r)<- stuff]
+ppr_id_extras_s :: [IfaceIdExtras] -> SDoc
+ppr_id_extras_s stuff = vcat (map ppr_id_extras stuff)
 
-ppr_id_extras :: Fixity -> [IfaceRule] -> SDoc
-ppr_id_extras fix rules = ppr fix $$ vcat (map ppr rules)
+ppr_id_extras :: IfaceIdExtras -> SDoc
+ppr_id_extras (IdExtras fix rules anns) = ppr fix $$ vcat (map ppr rules) $$ vcat (map ppr anns)
 
 -- This instance is used only to compute fingerprints
 instance Binary IfaceDeclExtras where
   get _bh = panic "no get for IfaceDeclExtras"
-  put_ bh (IfaceIdExtras fix rules) = do
-   putByte bh 1; put_ bh fix; put_ bh rules
-  put_ bh (IfaceDataExtras fix insts cons) = do
-   putByte bh 2; put_ bh fix; put_ bh insts; put_ bh cons
-  put_ bh (IfaceClassExtras fix insts methods) = do
-   putByte bh 3; put_ bh fix; put_ bh insts; put_ bh methods
-  put_ bh (IfaceSynExtras fix finsts) = do
-   putByte bh 4; put_ bh fix; put_ bh finsts
-  put_ bh IfaceOtherDeclExtras = do
-   putByte bh 5
+  put_ bh (IfaceIdExtras extras) = do
+   putByte bh 1; put_ bh extras
+  put_ bh (IfaceDataExtras fix insts anns cons) = do
+   putByte bh 2; put_ bh fix; put_ bh insts; put_ bh anns; put_ bh cons
+  put_ bh (IfaceClassExtras fix insts anns methods) = do
+   putByte bh 3; put_ bh fix; put_ bh insts; put_ bh anns; put_ bh methods
+  put_ bh (IfaceSynExtras fix finsts anns) = do
+   putByte bh 4; put_ bh fix; put_ bh finsts; put_ bh anns
+  put_ bh IfaceOtherDeclExtras = putByte bh 5
+
+instance Binary IfaceIdExtras where
+  get _bh = panic "no get for IfaceIdExtras"
+  put_ bh (IdExtras fix rules anns)= do { put_ bh fix; put_ bh rules; put_ bh anns }
 
 declExtras :: (OccName -> Fixity)
+           -> (OccName -> [AnnPayload])
            -> OccEnv [IfaceRule]
            -> OccEnv [IfaceClsInst]
            -> OccEnv [IfaceFamInst]
            -> IfaceDecl
            -> IfaceDeclExtras
 
-declExtras fix_fn rule_env inst_env fi_env decl
+declExtras fix_fn ann_fn rule_env inst_env fi_env decl
   = case decl of
-      IfaceId{} -> IfaceIdExtras (fix_fn n)
-                        (lookupOccEnvL rule_env n)
+      IfaceId{} -> IfaceIdExtras (id_extras n)
       IfaceData{ifCons=cons} ->
                      IfaceDataExtras (fix_fn n)
                         (map ifFamInstAxiom (lookupOccEnvL fi_env n) ++
                          map ifDFun         (lookupOccEnvL inst_env n))
+                        (ann_fn n)
                         (map (id_extras . ifConOcc) (visibleIfConDecls cons))
       IfaceClass{ifSigs=sigs, ifATs=ats} ->
                      IfaceClassExtras (fix_fn n)
@@ -796,13 +829,15 @@ declExtras fix_fn rule_env inst_env fi_env decl
                                     ++ lookupOccEnvL inst_env n)
                            -- Include instances of the associated types
                            -- as well as instances of the class (Trac #5147)
+                        (ann_fn n)
                         [id_extras op | IfaceClassOp op _ _ <- sigs]
       IfaceSyn{} -> IfaceSynExtras (fix_fn n)
                         (map ifFamInstAxiom (lookupOccEnvL fi_env n))
+                        (ann_fn n)
       _other -> IfaceOtherDeclExtras
   where
         n = ifName decl
-        id_extras occ = (fix_fn occ, lookupOccEnvL rule_env occ)
+        id_extras occ = IdExtras (fix_fn occ) (lookupOccEnvL rule_env occ) (ann_fn occ)
         at_extras (IfaceAT decl _) = lookupOccEnvL inst_env (ifName decl)
 
 
@@ -901,7 +936,7 @@ mk_mod_usage_info :: PackageIfaceTable
               -> NameSet
               -> [Usage]
 mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
-  = mapCatMaybes mkUsage usage_mods
+  = mapMaybe mkUsage usage_mods
   where
     hpt = hsc_HPT hsc_env
     dflags = hsc_dflags hsc_env
@@ -1019,13 +1054,11 @@ mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
 \end{code}
 
 \begin{code}
-mkIfaceAnnotations :: [Annotation] -> [IfaceAnnotation]
-mkIfaceAnnotations = map mkIfaceAnnotation
-
 mkIfaceAnnotation :: Annotation -> IfaceAnnotation
-mkIfaceAnnotation (Annotation { ann_target = target, ann_value = serialized }) = IfaceAnnotation {
+mkIfaceAnnotation (Annotation { ann_target = target, ann_value = payload }) 
+  = IfaceAnnotation {
         ifAnnotatedTarget = fmap nameOccName target,
-        ifAnnotatedValue = serialized
+        ifAnnotatedValue = payload
     }
 \end{code}
 
@@ -1427,8 +1460,9 @@ tyThingToIfaceDecl :: TyThing -> IfaceDecl
 tyThingToIfaceDecl (AnId id)      = idToIfaceDecl id
 tyThingToIfaceDecl (ATyCon tycon) = tyConToIfaceDecl emptyTidyEnv tycon
 tyThingToIfaceDecl (ACoAxiom ax)  = coAxiomToIfaceDecl ax
-tyThingToIfaceDecl (ADataCon dc)  = pprPanic "toIfaceDecl" (ppr dc)
-                                    -- Should be trimmed out earlier
+tyThingToIfaceDecl (AConLike cl)  = case cl of
+    RealDataCon dc -> dataConToIfaceDecl dc -- for ppr purposes only
+    PatSynCon ps   -> patSynToIfaceDecl ps
 
 --------------------------
 idToIfaceDecl :: Id -> IfaceDecl
@@ -1441,6 +1475,37 @@ idToIfaceDecl id
               ifType      = toIfaceType (idType id),
               ifIdDetails = toIfaceIdDetails (idDetails id),
               ifIdInfo    = toIfaceIdInfo (idInfo id) }
+
+--------------------------
+dataConToIfaceDecl :: DataCon -> IfaceDecl
+dataConToIfaceDecl dataCon
+  = IfaceId { ifName      = getOccName dataCon,
+              ifType      = toIfaceType (dataConUserType dataCon),
+              ifIdDetails = IfVanillaId,
+              ifIdInfo    = NoInfo }
+
+--------------------------
+patSynToIfaceDecl :: PatSyn -> IfaceDecl
+patSynToIfaceDecl ps
+  = IfacePatSyn { ifName          = getOccName . getName $ ps
+                , ifPatHasWrapper = isJust $ patSynWrapper ps
+                , ifPatIsInfix    = patSynIsInfix ps
+                , ifPatUnivTvs    = toIfaceTvBndrs univ_tvs'
+                , ifPatExTvs      = toIfaceTvBndrs ex_tvs'
+                , ifPatProvCtxt   = tidyToIfaceContext env2 prov_theta
+                , ifPatReqCtxt    = tidyToIfaceContext env2 req_theta
+                , ifPatArgs       = map toIfaceArg args
+                , ifPatTy         = tidyToIfaceType env2 rhs_ty
+                }
+  where
+    toIfaceArg var = (occNameFS (getOccName var),
+                      tidyToIfaceType env2 (varType var))
+
+    (univ_tvs, ex_tvs, (prov_theta, req_theta)) = patSynSig ps
+    args = patSynArgs ps
+    rhs_ty = patSynType ps
+    (env1, univ_tvs') = tidyTyVarBndrs emptyTidyEnv univ_tvs
+    (env2, ex_tvs')   = tidyTyVarBndrs env1 ex_tvs
 
 
 --------------------------
@@ -1460,7 +1525,7 @@ coAxiomToIfaceDecl ax@(CoAxiom { co_ax_tc = tycon, co_ax_branches = branches
 
 -- 2nd parameter is the list of branch LHSs, for conversion from incompatible branches
 -- to incompatible indices
--- See [Storing compatibility] in CoAxiom
+-- See Note [Storing compatibility] in CoAxiom
 coAxBranchToIfaceBranch :: TidyEnv -> [[Type]] -> CoAxBranch -> IfaceAxBranch
 coAxBranchToIfaceBranch env0 lhs_s
                         branch@(CoAxBranch { cab_incomps = incomps })
@@ -1482,7 +1547,9 @@ coAxBranchToIfaceBranch' env0
                   , ifaxbRHS    = tidyToIfaceType env1 rhs
                   , ifaxbIncomps = [] }
   where
-    (env1, tv_bndrs) = tidyTyVarBndrs env0 tvs
+    (env1, tv_bndrs) = tidyTyClTyVarBndrs env0 tvs
+    -- Don't re-bind in-scope tyvars
+    -- See Note [CoAxBranch type variables] in CoAxiom
 
 -----------------
 tyConToIfaceDecl :: TidyEnv -> TyCon -> IfaceDecl
@@ -1525,6 +1592,9 @@ tyConToIfaceDecl env tycon
     to_ifsyn_rhs AbstractClosedSynFamilyTyCon = IfaceAbstractClosedSynFamilyTyCon
     to_ifsyn_rhs (SynonymTyCon ty)
       = IfaceSynonymTyCon (tidyToIfaceType env1 ty)
+
+    to_ifsyn_rhs (BuiltInSynFamTyCon {}) = pprPanic "toIfaceDecl: BuiltInFamTyCon" (ppr tycon)
+
 
     ifaceConDecls (NewTyCon { data_con = con })     = IfNewTyCon  (ifaceConDecl con)
     ifaceConDecls (DataTyCon { data_cons = cons })  = IfDataTyCon (map ifaceConDecl cons)
@@ -1573,6 +1643,7 @@ classToIfaceDecl env clas
                  ifFDs    = map toIfaceFD clas_fds,
                  ifATs    = map toIfaceAT clas_ats,
                  ifSigs   = map toIfaceClassOp op_stuff,
+                 ifMinDef = fmap getOccName (classMinimalDef clas),
                  ifRec    = boolToRecFlag (isRecursiveTyCon tycon) }
   where
     (clas_tyvars, clas_fds, sc_theta, _, clas_ats, op_stuff)
@@ -1723,7 +1794,7 @@ toIfaceIdInfo id_info
                     inline_hsinfo,  unfold_hsinfo] of
        []    -> NoInfo
        infos -> HasInfo infos
-               -- NB: strictness must appear in the list before unfolding
+               -- NB: strictness and arity must appear in the list before unfolding
                -- See TcIface.tcUnfolding
   where
     ------------  Arity  --------------
@@ -1740,7 +1811,7 @@ toIfaceIdInfo id_info
     ------------  Strictness  --------------
         -- No point in explicitly exporting TopSig
     sig_info = strictnessInfo id_info
-    strict_hsinfo | not (isTopSig sig_info) = Just (HsStrictness sig_info)
+    strict_hsinfo | not (isNopSig sig_info) = Just (HsStrictness sig_info)
                   | otherwise               = Nothing
 
     ------------  Unfolding  --------------
@@ -1762,10 +1833,6 @@ toIfUnfolding lb (CoreUnfolding { uf_tmpl = rhs, uf_arity = arity
           -> case guidance of
                UnfWhen unsat_ok boring_ok -> IfInlineRule arity unsat_ok boring_ok if_rhs
                _other                     -> IfCoreUnfold True if_rhs
-        InlineWrapper w | isExternalName n -> IfExtWrapper arity n
-                        | otherwise        -> IfLclWrapper arity (getFS n)
-                        where
-                          n = idName w
         InlineCompulsory -> IfCompulsory if_rhs
         InlineRhs        -> IfCoreUnfold False if_rhs
         -- Yes, even if guidance is UnfNever, expose the unfolding
@@ -1837,13 +1904,17 @@ toIfaceExpr (Case s x ty as)
   | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
-toIfaceExpr (Tick t e)    = IfaceTick (toIfaceTickish t) (toIfaceExpr e)
+toIfaceExpr (Tick t e) 
+  | Just t' <- toIfaceTickish t = IfaceTick t' (toIfaceExpr e) 
+  | otherwise                   = toIfaceExpr e
 
 ---------------------
-toIfaceTickish :: Tickish Id -> IfaceTickish
-toIfaceTickish (ProfNote cc tick push) = IfaceSCC cc tick push
-toIfaceTickish (HpcTick modl ix)       = IfaceHpcTick modl ix
-toIfaceTickish _ = panic "toIfaceTickish"
+toIfaceTickish :: Tickish Id -> Maybe IfaceTickish
+toIfaceTickish (ProfNote cc tick push) = Just (IfaceSCC cc tick push)
+toIfaceTickish (HpcTick modl ix)       = Just (IfaceHpcTick modl ix)
+toIfaceTickish (Breakpoint {})         = Nothing 
+   -- Ignore breakpoints, since they are relevant only to GHCi, and 
+   -- should not be serialised (Trac #8333)
 
 ---------------------
 toIfaceBind :: Bind Id -> IfaceBinding

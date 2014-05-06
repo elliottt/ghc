@@ -18,13 +18,11 @@ module StaticFlags (
 
         staticFlags,
         initStaticOpts,
+        discardStaticFlags,
 
         -- Output style options
         opt_PprStyle_Debug,
         opt_NoDebugOutput,
-
-        -- language opts
-        opt_DictsStrict,
 
         -- optimisation opts
         opt_NoStateHack,
@@ -33,9 +31,6 @@ module StaticFlags (
 
         -- For the parser
         addOpt, removeOpt, v_opt_C_ready,
-
-        -- Saving/restoring globals
-        saveStaticFlagGlobals, restoreStaticFlagGlobals,
 
         -- For options autocompletion
         flagsStatic, flagsStaticNames
@@ -51,7 +46,6 @@ import Util
 import Panic
 
 import Control.Monad
-import Data.Char
 import Data.IORef
 import System.IO.Unsafe ( unsafePerformIO )
 
@@ -84,7 +78,7 @@ parseStaticFlagsFull :: [Flag IO] -> [Located String]
                      -> IO ([Located String], [Located String])
 parseStaticFlagsFull flagsAvailable args = do
   ready <- readIORef v_opt_C_ready
-  when ready $ throwGhcExceptionIO (ProgramError "Too late for parseStaticFlags: call it before newSession")
+  when ready $ throwGhcExceptionIO (ProgramError "Too late for parseStaticFlags: call it before runGhc or runGhcT")
 
   (leftover, errs, warns) <- processArgs flagsAvailable args
   when (not (null errs)) $ throwGhcExceptionIO $ errorsToGhcException errs
@@ -103,7 +97,7 @@ staticFlags :: [String]
 staticFlags = unsafePerformIO $ do
   ready <- readIORef v_opt_C_ready
   if (not ready)
-        then panic "Static flags have not been initialised!\n        Please call GHC.newSession or GHC.parseStaticFlags early enough."
+        then panic "Static flags have not been initialised!\n        Please call GHC.parseStaticFlags early enough."
         else readIORef v_opt_C
 
 -- All the static flags should appear in this list.  It describes how each
@@ -127,11 +121,6 @@ flagsStatic = [
   , Flag "dno-debug-output" (PassFlag addOptEwM)
   -- rest of the debugging flags are dynamic
 
-  ----- RTS opts ------------------------------------------------------
-  , Flag "H"           (HasArg (\s -> liftEwM (setHeapSize (fromIntegral (decodeSize s)))))
-
-  , Flag "Rghc-timing" (NoArg (liftEwM enableTimingStats))
-
   ------ Compiler flags -----------------------------------------------
   -- All other "-fno-<blah>" options cancel out "-f<blah>" on the hsc cmdline
   , Flag "fno-"
@@ -149,11 +138,25 @@ isStaticFlag f = f `elem` flagsStaticNames
 
 flagsStaticNames :: [String]
 flagsStaticNames = [
-    "fdicts-strict",
     "fno-state-hack",
     "fno-opt-coercion",
     "fcpr-off"
     ]
+
+-- We specifically need to discard static flags for clients of the
+-- GHC API, since they can't be safely reparsed or reinitialized. In general,
+-- the existing flags do nothing other than control debugging and some low-level
+-- optimizer phases, so for the most part this is OK.
+--
+-- See GHC issue #8267: http://ghc.haskell.org/trac/ghc/ticket/8276#comment:37
+discardStaticFlags :: [String] -> [String]
+discardStaticFlags = filter (\x -> x `notElem` flags)
+  where flags = [ "-fno-state-hack"
+                , "-fno-opt-coercion"
+                , "-fcpr-off"
+                , "-dppr-debug"
+                , "-dno-debug-output"
+                ]
 
 
 initStaticOpts :: IO ()
@@ -189,10 +192,6 @@ opt_PprStyle_Debug = lookUp  (fsLit "-dppr-debug")
 opt_NoDebugOutput  :: Bool
 opt_NoDebugOutput  = lookUp  (fsLit "-dno-debug-output")
 
--- language opts
-opt_DictsStrict    :: Bool
-opt_DictsStrict    = lookUp  (fsLit "-fdicts-strict")
-
 opt_NoStateHack    :: Bool
 opt_NoStateHack    = lookUp  (fsLit "-fno-state-hack")
 
@@ -202,41 +201,6 @@ opt_CprOff         = lookUp  (fsLit "-fcpr-off")
 
 opt_NoOptCoercion  :: Bool
 opt_NoOptCoercion  = lookUp  (fsLit "-fno-opt-coercion")
-
-
------------------------------------------------------------------------------
--- Convert sizes like "3.5M" into integers
-
-decodeSize :: String -> Integer
-decodeSize str
-  | c == ""      = truncate n
-  | c == "K" || c == "k" = truncate (n * 1000)
-  | c == "M" || c == "m" = truncate (n * 1000 * 1000)
-  | c == "G" || c == "g" = truncate (n * 1000 * 1000 * 1000)
-  | otherwise            = throwGhcException (CmdLineError ("can't decode size: " ++ str))
-  where (m, c) = span pred str
-        n      = readRational m
-        pred c = isDigit c || c == '.'
-
-
------------------------------------------------------------------------------
--- Tunneling our global variables into a new instance of the GHC library
-
-saveStaticFlagGlobals :: IO (Bool, [String])
-saveStaticFlagGlobals = liftM2 (,) (readIORef v_opt_C_ready) (readIORef v_opt_C)
-
-restoreStaticFlagGlobals :: (Bool, [String]) -> IO ()
-restoreStaticFlagGlobals (c_ready, c) = do
-    writeIORef v_opt_C_ready c_ready
-    writeIORef v_opt_C c
-
-
------------------------------------------------------------------------------
--- RTS Hooks
-
-foreign import ccall unsafe "setHeapSize"       setHeapSize       :: Int -> IO ()
-foreign import ccall unsafe "enableTimingStats" enableTimingStats :: IO ()
-
 
 {-
 -- (lookup_str "foo") looks for the flag -foo=X or -fooX,

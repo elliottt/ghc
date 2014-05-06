@@ -172,7 +172,7 @@ corePrepPgm dflags hsc_env binds data_tycons = do
                       floats2 <- corePrepTopBinds initialCorePrepEnv implicit_binds
                       return (deFloatTop (floats1 `appendFloats` floats2))
 
-    endPass dflags CorePrep binds_out []
+    endPass hsc_env CorePrep binds_out []
     return binds_out
 
 corePrepExpr :: DynFlags -> HscEnv -> CoreExpr -> IO CoreExpr
@@ -807,15 +807,15 @@ ignoreTickish _ = False
 
 cpe_ExprIsTrivial :: CoreExpr -> Bool
 -- Version that doesn't consider an scc annotation to be trivial.
-cpe_ExprIsTrivial (Var _)                  = True
-cpe_ExprIsTrivial (Type _)                 = True
-cpe_ExprIsTrivial (Coercion _)             = True
-cpe_ExprIsTrivial (Lit _)                  = True
-cpe_ExprIsTrivial (App e arg)              = isTypeArg arg && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Tick t e)             = not (tickishIsCode t) && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Cast e _)               = cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Var _)        = True
+cpe_ExprIsTrivial (Type _)       = True
+cpe_ExprIsTrivial (Coercion _)   = True
+cpe_ExprIsTrivial (Lit _)        = True
+cpe_ExprIsTrivial (App e arg)    = isTypeArg arg && cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Tick t e)     = not (tickishIsCode t) && cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Cast e _)     = cpe_ExprIsTrivial e
 cpe_ExprIsTrivial (Lam b body) | isTyVar b = cpe_ExprIsTrivial body
-cpe_ExprIsTrivial _                        = False
+cpe_ExprIsTrivial _              = False
 \end{code}
 
 -- -----------------------------------------------------------------------------

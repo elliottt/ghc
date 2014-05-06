@@ -11,7 +11,7 @@ The deriving code for the Generic class
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 
@@ -23,6 +23,7 @@ module TcGenGenerics (canDoGenerics, canDoGenerics1,
 import DynFlags
 import HsSyn
 import Type
+import Kind             ( isKind )
 import TcType
 import TcGenDeriv
 import DataCon
@@ -50,7 +51,6 @@ import FastString
 import Util
 
 import Control.Monad (mplus,forM)
-import qualified State as S
 
 #include "HsVersions.h"
 \end{code}
@@ -139,14 +139,21 @@ metaTyConsToDerivStuff tc metaDts =
         -- Datatype
         d_metaTycon = metaD metaDts
         d_inst   = mk_inst dClas d_metaTycon d_dfun_name
-        d_binds  = VanillaInst dBinds [] False
+        d_binds  = InstBindings { ib_binds = dBinds
+                                , ib_pragmas = []
+                                , ib_extensions = []
+                                , ib_standalone_deriving = False }
         d_mkInst = DerivInst (InstInfo { iSpec = d_inst, iBinds = d_binds })
         
         -- Constructor
         c_metaTycons = metaC metaDts
         c_insts = [ mk_inst cClas c ds
                   | (c, ds) <- myZip1 c_metaTycons c_dfun_names ]
-        c_binds = [ VanillaInst c [] False | c <- cBinds ]
+        c_binds = [ InstBindings { ib_binds = c
+                                 , ib_pragmas = []
+                                 , ib_extensions = []
+                                 , ib_standalone_deriving = False }
+                  | c <- cBinds ]
         c_mkInst = [ DerivInst (InstInfo { iSpec = is, iBinds = bs })
                    | (is,bs) <- myZip1 c_insts c_binds ]
         
@@ -154,7 +161,11 @@ metaTyConsToDerivStuff tc metaDts =
         s_metaTycons = metaS metaDts
         s_insts = map (map (\(s,ds) -> mk_inst sClas s ds))
                       (myZip2 s_metaTycons s_dfun_names)
-        s_binds = [ [ VanillaInst s [] False | s <- ss ] | ss <- sBinds ]
+        s_binds = [ [ InstBindings { ib_binds = s
+                                   , ib_pragmas = []
+                                   , ib_extensions = []
+                                   , ib_standalone_deriving = False }
+                    | s <- ss ] | ss <- sBinds ]
         s_mkInst = map (map (\(is,bs) -> DerivInst (InstInfo { iSpec  = is
                                                              , iBinds = bs})))
                        (myZip2 s_insts s_binds)
@@ -178,33 +189,77 @@ metaTyConsToDerivStuff tc metaDts =
 %************************************************************************
 
 \begin{code}
-get_gen1_constrained_tys :: TyVar -> [Type] -> [Type]
+get_gen1_constrained_tys :: TyVar -> Type -> [Type]
 -- called by TcDeriv.inferConstraints; generates a list of types, each of which
 -- must be a Functor in order for the Generic1 instance to work.
-get_gen1_constrained_tys argVar =
-  concatMap $ argTyFold argVar $ ArgTyAlg {
-    ata_rec0 = const [],
-    ata_par1 = [], ata_rec1 = const [],
-    ata_comp = (:)}
+get_gen1_constrained_tys argVar
+  = argTyFold argVar $ ArgTyAlg { ata_rec0 = const []
+                                , ata_par1 = [], ata_rec1 = const []
+                                , ata_comp = (:) }
 
+{-
 
+Note [Requirements for deriving Generic and Rep]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In the following, T, Tfun, and Targ are "meta-variables" ranging over type
+expressions.
+
+(Generic T) and (Rep T) are derivable for some type expression T if the
+following constraints are satisfied.
+
+  (a) T = (D v1 ... vn) with free variables v1, v2, ..., vn where n >= 0 v1
+      ... vn are distinct type variables. Cf #5939.
+
+  (b) D is a type constructor *value*. In other words, D is either a type
+      constructor or it is equivalent to the head of a data family instance (up to
+      alpha-renaming).
+
+  (c) D cannot have a "stupid context".
+
+  (d) The right-hand side of D cannot include unboxed types, existential types,
+      or universally quantified types.
+
+  (e) T :: *.
+
+(Generic1 T) and (Rep1 T) are derivable for some type expression T if the
+following constraints are satisfied.
+
+  (a),(b),(c),(d) As above.
+
+  (f) T must expect arguments, and its last parameter must have kind *.
+
+      We use `a' to denote the parameter of D that corresponds to the last
+      parameter of T.
+
+  (g) For any type-level application (Tfun Targ) in the right-hand side of D
+      where the head of Tfun is not a tuple constructor:
+
+      (b1) `a' must not occur in Tfun.
+
+      (b2) If `a' occurs in Targ, then Tfun :: * -> *.
+
+-}
 
 canDoGenerics :: TyCon -> [Type] -> Maybe SDoc
--- Called on source-code data types, to see if we should generate
--- generic functions for them.
--- Nothing == yes
--- Just s  == no, because of `s`
-
+-- canDoGenerics rep_tc tc_args determines if Generic/Rep can be derived for a
+-- type expression (rep_tc tc_arg0 tc_arg1 ... tc_argn).
+--
+-- Check (b) from Note [Requirements for deriving Generic and Rep] is taken
+-- care of because canDoGenerics is applied to rep tycons.
+--
+-- It returns Nothing if deriving is possible. It returns (Just reason) if not.
 canDoGenerics tc tc_args
   = mergeErrors (
-          -- We do not support datatypes with context
+          -- Check (c) from Note [Requirements for deriving Generic and Rep].
               (if (not (null (tyConStupidTheta tc)))
                 then (Just (tc_name <+> text "must not have a datatype context"))
                 else Nothing) :
-          -- The type arguments should not be instantiated (see #5939)
-          -- Data family indices can be instantiated; the `tc_args` here are the
-          -- representation tycon args
-              (if (all isTyVarTy (filterOut isKindTy tc_args))
+          -- Check (a) from Note [Requirements for deriving Generic and Rep].
+          --
+          -- Data family indices can be instantiated; the `tc_args` here are
+          -- the representation tycon args
+              (if (all isTyVarTy (filterOut isKind tc_args))
                 then Nothing
                 else Just (tc_name <+> text "must not be instantiated;" <+>
                            text "try deriving `" <> tc_name <+> tc_tys <>
@@ -219,7 +274,9 @@ canDoGenerics tc tc_args
                                             (tys ++ drop (length tys) tc_args)))
         _                      -> (ppr tc, hsep (map ppr (tyConTyVars tc)))
 
-        -- If any of the constructor has an unboxed type as argument,
+        -- Check (d) from Note [Requirements for deriving Generic and Rep].
+        --
+        -- If any of the constructors has an unboxed type as argument,
         -- then we can't build the embedding-projection pair, because
         -- it relies on instantiating *polymorphic* sum and product types
         -- at the argument types of the constructors
@@ -240,47 +297,62 @@ mergeErrors ((Just s):t) = case mergeErrors t of
   Just s' -> Just (s <> text ", and" $$ s')
 mergeErrors (Nothing :t) = mergeErrors t
 
+-- A datatype used only inside of canDoGenerics1. It's the result of analysing
+-- a type term.
+data Check_for_CanDoGenerics1 = CCDG1
+  { _ccdg1_hasParam :: Bool       -- does the parameter of interest occurs in
+                                  -- this type?
+  , _ccdg1_errors   :: Maybe SDoc -- errors generated by this type
+  }
+
+{-
+
+Note [degenerate use of FFoldType]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We use foldDataConArgs here only for its ability to treat tuples
+specially. foldDataConArgs also tracks covariance (though it assumes all
+higher-order type parameters are covariant) and has hooks for special handling
+of functions and polytypes, but we do *not* use those.
+
+The key issue is that Generic1 deriving currently offers no sophisticated
+support for functions. For example, we cannot handle
+
+  data F a = F ((a -> Int) -> Int)
+
+even though a is occurring covariantly.
+
+In fact, our rule is harsh: a is simply not allowed to occur within the first
+argument of (->). We treat (->) the same as any other non-tuple tycon.
+
+Unfortunately, this means we have to track "the parameter occurs in this type"
+explicitly, even though foldDataConArgs is also doing this internally.
+
+-}
+
+-- canDoGenerics1 rep_tc tc_args determines if a Generic1/Rep1 can be derived
+-- for a type expression (rep_tc tc_arg0 tc_arg1 ... tc_argn).
+--
+-- Checks (a) through (d) from Note [Requirements for deriving Generic and Rep]
+-- are taken care of by the call to canDoGenerics.
+--
+-- It returns Nothing if deriving is possible. It returns (Just reason) if not.
 canDoGenerics1 :: TyCon -> [Type] -> Maybe SDoc
--- Called on source-code data types, to see if we should generate
--- generic functions for them.
--- Nothing == yes
--- Just s  == no, because of `s`
-
--- (derived from TcDeriv.cond_functorOK; also checks canDoGenerics)
-
--- OK for Generic1/Rep1
--- Currently: (a) at least one argument
---            (b) don't use argument contravariantly
---            (c) don't use argument in the wrong place, e.g. data T a = T (X a a)
---            (d) no "stupid context" on data type
---            (e) not instantiated (except for data family indices)
-canDoGenerics1 tc tc_args = canDoGenerics tc tc_args
-                              `mplus` S.evalState (canDoGenerics1_w tc) []
-
--- the state is which tycons we have entered; it avoids divergence when we
--- recur (robust against mutual recursion)
-canDoGenerics1_w :: TyCon -> S.State [Name] (Maybe SDoc)
-canDoGenerics1_w rep_tc
-  | null tc_tvs
-  = return $ Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc)
-          <+> ptext (sLit "must have some type parameters"))
-
-  | not (null bad_stupid_theta)
-  = return $ Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc)
-          <+> ptext (sLit "must not have a class context") <+> pprTheta bad_stupid_theta)
-
-  | otherwise
-  = (mergeErrors . concat) `fmap` mapM check_con data_cons
+canDoGenerics1 rep_tc tc_args =
+  canDoGenerics rep_tc tc_args `mplus` additionalChecks
   where
-    tc_tvs            = tyConTyVars rep_tc
-    Just (_, last_tv) = snocView tc_tvs
-    bad_stupid_theta  = filter is_bad (tyConStupidTheta rep_tc)
-    is_bad pred       = last_tv `elemVarSet` tyVarsOfType pred
+    additionalChecks
+        -- check (f) from Note [Requirements for deriving Generic and Rep]
+      | null (tyConTyVars rep_tc) = Just $
+          ptext (sLit "Data type") <+> quotes (ppr rep_tc)
+      <+> ptext (sLit "must have some type parameters")
+
+      | otherwise = mergeErrors $ concatMap check_con data_cons
 
     data_cons = tyConDataCons rep_tc
     check_con con = case check_vanilla con of
-      j@(Just _) -> return [j]
-      Nothing -> mapM snd $ foldDataConArgs (ft_check con) con
+      j@(Just _) -> [j]
+      Nothing -> _ccdg1_errors `map` foldDataConArgs (ft_check con) con
 
     bad :: DataCon -> SDoc -> SDoc
     bad con msg = ptext (sLit "Constructor") <+> quotes (ppr con) <+> msg
@@ -289,49 +361,42 @@ canDoGenerics1_w rep_tc
     check_vanilla con | isVanillaDataCon con = Nothing
                       | otherwise            = Just (bad con existential)
 
-    -- the Bool is if the parameter occurs in the type
-    ft_check :: DataCon -> FFoldType (Bool, S.State [Name] (Maybe SDoc))
-    ft_check con = FT { ft_triv = bmzero, ft_var = (True, return Nothing)
-                      , ft_co_var = (True, return $ Just $ bad con covariant)
-                        -- NB foldDataConArgs caters to Functor/Foldable/etc,
-                        -- which treat applications of functions and tuples
-                        -- specially. But we just treat them like normal
-                        -- applications, so we must compensate with extra logic
-                        -- to ensure that the variable only occurs as the last
-                        -- argument.
-                      , ft_fun = \x y -> if fst x then (True, return $ Just $ bad con wrong_arg)
-                                         else x `bmplus` y
-                      , ft_tup = \_ xs ->
-                          if not (null xs) && any fst (init xs)
-                          then (True, return $ Just $ bad con wrong_arg)
-                          else foldr bmplus bmzero xs
-                      , ft_ty_app = \ty x -> bmplus x $ (,) False $
-                          if fst x then representable ty else return Nothing
-                      , ft_bad_app = (True, return $ Just $ bad con wrong_arg)
-                      , ft_forall = \_ -> id }
+    bmzero      = CCDG1 False Nothing
+    bmbad con s = CCDG1 True $ Just $ bad con s
+    bmplus (CCDG1 b1 m1) (CCDG1 b2 m2) = CCDG1 (b1 || b2) (mplus m1 m2)
 
-    bmzero = (False, return Nothing)
-    bmplus (b1, m1) (b2, m2) = (b1 || b2, m1 >>= maybe m2 (return . Just))
+    -- check (g) from Note [degenerate use of FFoldType]
+    ft_check :: DataCon -> FFoldType Check_for_CanDoGenerics1
+    ft_check con = FT
+      { ft_triv = bmzero
 
-    representable :: Type -> S.State [Name] (Maybe SDoc)
-    representable ty = case tcSplitTyConApp_maybe ty of
-      Nothing -> return Nothing
-      -- if it's a type constructor, it has to be representable
-      Just (tc, _) -> do
-        let n = tyConName tc
-        s <- S.get
-        -- internally assume that recursive occurrences are OK
-        if n `elem` s then return Nothing else do
-          S.put (n : s)
-          fmap {-maybe-} (\_ -> bad_app tc) -- don't give the message, just
-                                            -- name what wasn't representable
-            `fmap` {-state-} canDoGenerics1_w tc
+      , ft_var = caseVar, ft_co_var = caseVar
 
-    existential = (ptext . sLit) "must not have existential arguments"
-    covariant   = (ptext . sLit) "must not use the last type parameter in a function argument"
-    wrong_arg   = (ptext . sLit) "must use the last type parameter only as the last argument of a data type, newtype, or (->)"
-    bad_app tc  = (ptext . sLit) "must not apply type constructors that cannot be represented with `Rep1' (such as `" <> ppr (tyConName tc)
-                  <> (ptext . sLit) "') to arguments that involve the last type parameter"
+      -- (component_0,component_1,...,component_n)
+      , ft_tup = \_ components -> if any _ccdg1_hasParam (init components)
+                                  then bmbad con wrong_arg
+                                  else foldr bmplus bmzero components
+
+      -- (dom -> rng), where the head of ty is not a tuple tycon
+      , ft_fun = \dom rng -> -- cf #8516
+          if _ccdg1_hasParam dom
+          then bmbad con wrong_arg
+          else bmplus dom rng
+
+      -- (ty arg), where head of ty is neither (->) nor a tuple constructor and
+      -- the parameter of interest does not occur in ty
+      , ft_ty_app = \_ arg -> arg
+
+      , ft_bad_app = bmbad con wrong_arg
+      , ft_forall  = \_ body -> body -- polytypes are handled elsewhere
+      }
+      where
+        caseVar = CCDG1 True Nothing
+
+
+    existential = text "must not have existential arguments"
+    wrong_arg   = text "applies a type to an argument involving the last parameter"
+               $$ text "but the applied type is not of kind * -> *"
 
 \end{code}
 
@@ -370,9 +435,9 @@ gk2gkDC Gen1_{} d = Gen1_DC $ last $ dataConUnivTyVars d
 -- Bindings for the Generic instance
 mkBindsRep :: GenericKind -> TyCon -> LHsBinds RdrName
 mkBindsRep gk tycon = 
-    unitBag (L loc (mkFunBind (L loc from01_RDR) from_matches))
+    unitBag (mkRdrFunBind (L loc from01_RDR) from_matches)
   `unionBags`
-    unitBag (L loc (mkFunBind (L loc to01_RDR) to_matches))
+    unitBag (mkRdrFunBind (L loc to01_RDR) to_matches)
       where
         from_matches  = [mkSimpleHsAlt pat rhs | (pat,rhs) <- from_alts]
         to_matches    = [mkSimpleHsAlt pat rhs | (pat,rhs) <- to_alts  ]
@@ -465,11 +530,11 @@ data ArgTyAlg a = ArgTyAlg
 -- > arg t = case t of
 -- >   _ | isTyVar t         -> if (t == argVar) then Par1 else Par0 t
 -- >   App f [t'] |
---       representable1 f &&
---       t' == argVar        -> Rec1 f
+-- >     representable1 f &&
+-- >     t' == argVar        -> Rec1 f
 -- >   App f [t'] |
---       representable1 f &&
---       t' has tyvars       -> f :.: (arg t')
+-- >     representable1 f &&
+-- >     t' has tyvars       -> f :.: (arg t')
 -- >   _                     -> Rec0 t
 --
 -- where @argVar@ is the last type variable in the data type declaration we are
@@ -614,7 +679,7 @@ mkBindsMetaD :: FixityEnv -> TyCon
 mkBindsMetaD fix_env tycon = (dtBinds, allConBinds, allSelBinds)
       where
         mkBag l = foldr1 unionBags 
-                    [ unitBag (L loc (mkFunBind (L loc name) matches)) 
+                    [ unitBag (mkRdrFunBind (L loc name) matches)
                         | (name, matches) <- l ]
         dtBinds       = mkBag ( [ (datatypeName_RDR, dtName_matches)
                                 , (moduleName_RDR, moduleName_matches)]

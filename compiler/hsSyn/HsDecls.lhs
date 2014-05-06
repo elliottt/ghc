@@ -15,7 +15,8 @@ module HsDecls (
   -- * Toplevel declarations
   HsDecl(..), LHsDecl, HsDataDefn(..),
   -- ** Class or type declarations
-  TyClDecl(..), LTyClDecl, TyClGroup,
+  TyClDecl(..), LTyClDecl,
+  TyClGroup(..), tyClGroupConcat, mkTyClGroup,
   isClassDecl, isDataDecl, isSynDecl, tcdName,
   isFamilyDecl, isTypeFamilyDecl, isDataFamilyDecl,
   isOpenTypeFamilyInfo, isClosedTypeFamilyInfo,
@@ -41,8 +42,8 @@ module HsDecls (
   lvectDeclName, lvectInstDecl,
   -- ** @default@ declarations
   DefaultDecl(..), LDefaultDecl,
-  -- ** Top-level template haskell splice
-  SpliceDecl(..),
+  -- ** Template haskell declaration splice
+  SpliceDecl(..), LSpliceDecl,
   -- ** Foreign function interface declarations
   ForeignDecl(..), LForeignDecl, ForeignImport(..), ForeignExport(..),
   noForeignImportCoercionYet, noForeignExportCoercionYet,
@@ -57,13 +58,16 @@ module HsDecls (
   -- ** Annotations
   AnnDecl(..), LAnnDecl, 
   AnnProvenance(..), annProvenanceName_maybe,
+  -- ** Role annotations
+  RoleAnnotDecl(..), LRoleAnnotDecl, roleAnnotDeclName,
 
   -- * Grouping
   HsGroup(..),  emptyRdrGroup, emptyRnGroup, appendGroups
+
     ) where
 
 -- friends:
-import {-# SOURCE #-}   HsExpr( LHsExpr, HsExpr, pprExpr )
+import {-# SOURCE #-}   HsExpr( LHsExpr, HsExpr, HsSplice, pprExpr, pprUntypedSplice )
         -- Because Expr imports Decls via HsBracket
 
 import HsBinds
@@ -116,6 +120,7 @@ data HsDecl id
   | SpliceD     (SpliceDecl id)
   | DocD        (DocDecl)
   | QuasiQuoteD (HsQuasiQuote id)
+  | RoleAnnotD  (RoleAnnotDecl id)
   deriving (Data, Typeable)
 
 
@@ -137,8 +142,9 @@ data HsDecl id
 data HsGroup id
   = HsGroup {
         hs_valds  :: HsValBinds id,
+        hs_splcds :: [LSpliceDecl id],
 
-        hs_tyclds :: [[LTyClDecl id]],
+        hs_tyclds :: [TyClGroup id],
                 -- A list of mutually-recursive groups
                 -- No family-instances here; they are in hs_instds
                 -- Parser generates a singleton list;
@@ -172,12 +178,14 @@ emptyGroup = HsGroup { hs_tyclds = [], hs_instds = [],
                        hs_fixds = [], hs_defds = [], hs_annds = [],
                        hs_fords = [], hs_warnds = [], hs_ruleds = [], hs_vects = [],
                        hs_valds = error "emptyGroup hs_valds: Can't happen",
+                       hs_splcds = [],
                        hs_docs = [] }
 
 appendGroups :: HsGroup a -> HsGroup a -> HsGroup a
 appendGroups 
     HsGroup { 
         hs_valds  = val_groups1,
+        hs_splcds = spliceds1,
         hs_tyclds = tyclds1, 
         hs_instds = instds1,
         hs_derivds = derivds1,
@@ -191,6 +199,7 @@ appendGroups
   hs_docs   = docs1 }
     HsGroup { 
         hs_valds  = val_groups2,
+        hs_splcds = spliceds2,
         hs_tyclds = tyclds2, 
         hs_instds = instds2,
         hs_derivds = derivds2,
@@ -205,6 +214,7 @@ appendGroups
   = 
     HsGroup { 
         hs_valds  = val_groups1 `plusHsValBinds` val_groups2,
+        hs_splcds = spliceds1 ++ spliceds2, 
         hs_tyclds = tyclds1 ++ tyclds2, 
         hs_instds = instds1 ++ instds2,
         hs_derivds = derivds1 ++ derivds2,
@@ -234,6 +244,7 @@ instance OutputableBndr name => Outputable (HsDecl name) where
     ppr (SpliceD dd)            = ppr dd
     ppr (DocD doc)              = ppr doc
     ppr (QuasiQuoteD qq)        = ppr qq
+    ppr (RoleAnnotD ra)         = ppr ra
 
 instance OutputableBndr name => Outputable (HsGroup name) where
     ppr (HsGroup { hs_valds  = val_decls,
@@ -255,7 +266,7 @@ instance OutputableBndr name => Outputable (HsGroup name) where
              if isEmptyValBinds val_decls 
                 then Nothing 
                 else Just (ppr val_decls),
-             ppr_ds (concat tycl_decls), 
+             ppr_ds (tyClGroupConcat tycl_decls), 
              ppr_ds inst_decls,
              ppr_ds deriv_decls,
              ppr_ds foreign_decls]
@@ -270,15 +281,16 @@ instance OutputableBndr name => Outputable (HsGroup name) where
           vcat_mb gap (Nothing : ds) = vcat_mb gap ds
           vcat_mb gap (Just d  : ds) = gap $$ d $$ vcat_mb blankLine ds
 
+type LSpliceDecl name = Located (SpliceDecl name)
 data SpliceDecl id 
   = SpliceDecl                  -- Top level splice
-        (Located (HsExpr id))
+        (Located (HsSplice id))
         HsExplicitFlag          -- Explicit <=> $(f x y)
                                 -- Implicit <=> f x y,  i.e. a naked top level expression
     deriving (Data, Typeable)
 
 instance OutputableBndr name => Outputable (SpliceDecl name) where
-   ppr (SpliceDecl e _) = ptext (sLit "$") <> parens (pprExpr (unLoc e))
+   ppr (SpliceDecl (L _ e) _) = pprUntypedSplice e
 \end{code}
 
 
@@ -423,9 +435,6 @@ Interface file code:
 
 \begin{code}
 type LTyClDecl name = Located (TyClDecl name)
-type TyClGroup name = [LTyClDecl name]  -- This is used in TcTyClsDecls to represent
-                                        -- strongly connected components of decls
-                                        -- No familiy instances in here
 
 -- | A type or class declaration.
 data TyClDecl name
@@ -439,10 +448,10 @@ data TyClDecl name
 
   | -- | @type@ declaration
     SynDecl { tcdLName  :: Located name            -- ^ Type constructor
-           , tcdTyVars :: LHsTyVarBndrs name      -- ^ Type variables; for an associated type
+            , tcdTyVars :: LHsTyVarBndrs name      -- ^ Type variables; for an associated type
                                                   --   these include outer binders
-           , tcdRhs    :: LHsType name            -- ^ RHS of type declaration
-           , tcdFVs    :: NameSet }
+            , tcdRhs    :: LHsType name            -- ^ RHS of type declaration
+            , tcdFVs    :: NameSet }
 
   | -- | @data@ declaration
     DataDecl { tcdLName    :: Located name        -- ^ Type constructor
@@ -467,7 +476,24 @@ data TyClDecl name
                 tcdDocs    :: [LDocDecl],               -- ^ Haddock docs
                 tcdFVs     :: NameSet
     }
+    
   deriving (Data, Typeable)
+
+ -- This is used in TcTyClsDecls to represent
+ -- strongly connected components of decls
+ -- No familiy instances in here
+ -- The role annotations must be grouped with their decls for the
+ -- type-checker to infer roles correctly
+data TyClGroup name
+  = TyClGroup { group_tyclds :: [LTyClDecl name]
+              , group_roles  :: [LRoleAnnotDecl name] }
+    deriving (Data, Typeable)
+
+tyClGroupConcat :: [TyClGroup name] -> [LTyClDecl name]
+tyClGroupConcat = concatMap group_tyclds
+
+mkTyClGroup :: [LTyClDecl name] -> TyClGroup name
+mkTyClGroup decls = TyClGroup { group_tyclds = decls, group_roles = [] }
 
 type LFamilyDecl name = Located (FamilyDecl name)
 data FamilyDecl name = FamilyDecl
@@ -612,6 +638,11 @@ instance OutputableBndr name
         top_matter = ptext (sLit "class") 
                      <+> pp_vanilla_decl_head lclas tyvars (unLoc context)
                      <+> pprFundeps (map unLoc fds)
+
+instance OutputableBndr name => Outputable (TyClGroup name) where
+  ppr (TyClGroup { group_tyclds = tyclds, group_roles = roles })
+    = ppr tyclds $$
+      ppr roles
 
 instance (OutputableBndr name) => Outputable (FamilyDecl name) where
   ppr (FamilyDecl { fdInfo = info, fdLName = ltycon, 
@@ -1382,4 +1413,33 @@ pprAnnProvenance :: OutputableBndr name => AnnProvenance name -> SDoc
 pprAnnProvenance ModuleAnnProvenance       = ptext (sLit "ANN module")
 pprAnnProvenance (ValueAnnProvenance name) = ptext (sLit "ANN") <+> ppr name
 pprAnnProvenance (TypeAnnProvenance name)  = ptext (sLit "ANN type") <+> ppr name
+\end{code}
+
+%************************************************************************
+%*                                                                      *
+\subsection[RoleAnnot]{Role annotations}
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+type LRoleAnnotDecl name = Located (RoleAnnotDecl name)
+
+-- See #8185 for more info about why role annotations are
+-- top-level declarations
+data RoleAnnotDecl name
+  = RoleAnnotDecl (Located name)         -- type constructor
+                  [Located (Maybe Role)] -- optional annotations
+  deriving (Data, Typeable)
+
+instance OutputableBndr name => Outputable (RoleAnnotDecl name) where
+  ppr (RoleAnnotDecl ltycon roles)
+    = ptext (sLit "type role") <+> ppr ltycon <+>
+      hsep (map (pp_role . unLoc) roles)
+    where
+      pp_role Nothing  = underscore
+      pp_role (Just r) = ppr r
+
+roleAnnotDeclName :: RoleAnnotDecl name -> name
+roleAnnotDeclName (RoleAnnotDecl (L _ name) _) = name
+
 \end{code}

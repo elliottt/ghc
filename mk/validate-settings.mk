@@ -10,6 +10,8 @@ HADDOCK_DOCS    = YES
 #####################
 # Warnings
 
+ifneq "$(GccIsClang)" "YES"
+
 # Debian doesn't turn -Werror=unused-but-set-variable on by default, so
 # we turn it on explicitly for consistency with other users
 ifeq "$(GccLT46)" "NO"
@@ -18,11 +20,19 @@ SRC_CC_WARNING_OPTS += -Werror=unused-but-set-variable
 SRC_CC_WARNING_OPTS += -Wno-error=inline
 endif
 
+else
+
+# Don't warn about unknown GCC pragmas when using clang
+SRC_CC_WARNING_OPTS += -Wno-unknown-pragmas
+
+endif
+
 SRC_CC_OPTS     += $(WERROR) -Wall
 SRC_HC_OPTS     += $(WERROR) -Wall
 
 GhcStage1HcOpts += -fwarn-tabs
 GhcStage2HcOpts += -fwarn-tabs
+
 utils/hpc_dist-install_EXTRA_HC_OPTS += -fwarn-tabs
 
 #####################

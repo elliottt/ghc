@@ -9,7 +9,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module DataCon (
@@ -36,7 +36,11 @@ module DataCon (
 	dataConIsInfix,
 	dataConWorkId, dataConWrapId, dataConWrapId_maybe, dataConImplicitIds,
 	dataConRepStrictness, dataConRepBangs, dataConBoxer,
-	
+
+	splitDataProductType_maybe,
+
+        tyConsOfTyCon,
+
 	-- ** Predicates on DataCons
 	isNullarySrcDataCon, isNullaryRepDataCon, isTupleDataCon, isUnboxedTupleCon,
 	isVanillaDataCon, classDataCon, dataConCannotMatch,
@@ -68,6 +72,7 @@ import BasicTypes
 import FastString
 import Module
 import VarEnv
+import NameEnv
 
 import qualified Data.Data as Data
 import qualified Data.Typeable
@@ -994,6 +999,9 @@ dataConCannotMatch tys con
 %*									*
 %************************************************************************
 
+buildAlgTyCon is here because it is called from TysWiredIn, which in turn
+depends on DataCon, but not on BuildTyCl.
+
 \begin{code}
 buildAlgTyCon :: Name 
               -> [TyVar]               -- ^ Kind variables and type variables
@@ -1032,7 +1040,7 @@ buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs
 
 These two 'promoted..' functions are here because
  * They belong together
- * 'prmoteDataCon' depends on DataCon stuff
+ * 'promoteDataCon' depends on DataCon stuff
 
 \begin{code}
 promoteDataCon :: DataCon -> TyCon
@@ -1085,4 +1093,53 @@ promoteKind (TyConApp tc [])
   | tc `hasKey` liftedTypeKindTyConKey = superKind
 promoteKind (FunTy arg res) = FunTy (promoteKind arg) (promoteKind res)
 promoteKind k = pprPanic "promoteKind" (ppr k)
+\end{code}
+
+%************************************************************************
+%*									*
+\subsection{Splitting products}
+%*									*
+%************************************************************************
+
+\begin{code}
+-- | Extract the type constructor, type argument, data constructor and it's
+-- /representation/ argument types from a type if it is a product type.
+--
+-- Precisely, we return @Just@ for any type that is all of:
+--
+--  * Concrete (i.e. constructors visible)
+--
+--  * Single-constructor
+--
+--  * Not existentially quantified
+--
+-- Whether the type is a @data@ type or a @newtype@
+splitDataProductType_maybe
+	:: Type 			-- ^ A product type, perhaps
+	-> Maybe (TyCon, 		-- The type constructor
+		  [Type],		-- Type args of the tycon
+		  DataCon,		-- The data constructor
+		  [Type])		-- Its /representation/ arg types
+
+	-- Rejecing existentials is conservative.  Maybe some things
+	-- could be made to work with them, but I'm not going to sweat
+	-- it through till someone finds it's important.
+
+splitDataProductType_maybe ty
+  | Just (tycon, ty_args) <- splitTyConApp_maybe ty
+  , Just con <- isDataProductTyCon_maybe tycon
+  = Just (tycon, ty_args, con, dataConInstArgTys con ty_args)
+  | otherwise
+  = Nothing
+
+-- | All type constructors used in the definition of this type constructor,
+--   recursively. This is used to find out all the type constructors whose data
+--   constructors need to be in scope to be allowed to safely coerce under this
+--   type constructor in Safe Haskell mode.
+tyConsOfTyCon :: TyCon -> [TyCon]
+tyConsOfTyCon tc = nameEnvElts (add tc emptyNameEnv)
+  where
+     go env tc = foldr add env (tyConDataCons tc >>= dataConOrigArgTys >>= tyConsOfType)
+     add tc env | tyConName tc `elemNameEnv` env = env
+                | otherwise = go (extendNameEnv env (tyConName tc) tc) tc
 \end{code}

@@ -22,8 +22,8 @@ module IfaceType (
         toIfaceCoercion,
 
         -- Printing
-        pprIfaceType, pprParendIfaceType, pprIfaceContext,
-        pprIfaceIdBndr, pprIfaceTvBndr, pprIfaceTvBndrs, pprIfaceTvBndrsRoles,
+        pprIfaceType, pprParendIfaceType, pprIfaceContext, pprIfaceContextArr,
+        pprIfaceIdBndr, pprIfaceTvBndr, pprIfaceTvBndrs,
         pprIfaceBndrs,
         tOP_PREC, tYCON_PREC, noParens, maybeParen, pprIfaceForAllPart,
         pprIfaceCoercion, pprParendIfaceCoercion
@@ -31,6 +31,8 @@ module IfaceType (
     ) where
 
 import Coercion
+import TcType
+import DynFlags
 import TypeRep hiding( maybeParen )
 import Unique( hasKey )
 import TyCon
@@ -106,6 +108,7 @@ data IfaceCoercion
   | IfaceLRCo        LeftOrRight IfaceCoercion
   | IfaceInstCo      IfaceCoercion IfaceType
   | IfaceSubCo       IfaceCoercion
+  | IfaceAxiomRuleCo IfLclName [IfaceType] [IfaceCoercion]
 \end{code}
 
 %************************************************************************
@@ -186,11 +189,6 @@ pprIfaceTvBndr (tv, kind) = parens (ppr tv <> dcolon <> ppr kind)
 pprIfaceTvBndrs :: [IfaceTvBndr] -> SDoc
 pprIfaceTvBndrs tyvars = sep (map pprIfaceTvBndr tyvars)
 
-pprIfaceTvBndrsRoles :: [IfaceTvBndr] -> [Role] -> SDoc
-pprIfaceTvBndrsRoles tyvars roles = sep (zipWith ppr_bndr_role tyvars roles)
-  where
-    ppr_bndr_role bndr role = pprIfaceTvBndr bndr <> char '@' <> ppr role
-
 instance Binary IfaceBndr where
     put_ bh (IfaceIdBndr aa) = do
             putByte bh 0
@@ -252,15 +250,18 @@ ppr_ty ctxt_prec ty@(IfaceForAllTy _ _)
  where
     (tvs, theta, tau) = splitIfaceSigmaTy ty
 
- -------------------
+-------------------
 -- needs to handle type contexts and coercion contexts, hence the
 -- generality
 pprIfaceForAllPart :: Outputable a => [IfaceTvBndr] -> [a] -> SDoc -> SDoc
 pprIfaceForAllPart tvs ctxt doc
-  = sep [ppr_tvs, pprIfaceContext ctxt, doc]
+  = sep [ppr_tvs, pprIfaceContextArr ctxt, doc]
   where
     ppr_tvs | null tvs  = empty
-            | otherwise = ptext (sLit "forall") <+> pprIfaceTvBndrs tvs <> dot
+            | otherwise = sdocWithDynFlags $ \ dflags ->
+            if gopt Opt_PrintExplicitForalls dflags
+            then ptext (sLit "forall") <+> pprIfaceTvBndrs tvs <> dot
+            else empty
 
 -------------------
 ppr_tc_app :: (Int -> a -> SDoc) -> Int -> IfaceTyCon -> [a] -> SDoc
@@ -334,6 +335,10 @@ ppr_co ctxt_prec (IfaceInstCo co ty)
   = maybeParen ctxt_prec tYCON_PREC $
     ptext (sLit "Inst") <+> pprParendIfaceCoercion co <+> pprParendIfaceType ty
 
+ppr_co ctxt_prec (IfaceAxiomRuleCo tc tys cos)
+  = maybeParen ctxt_prec tYCON_PREC
+               (sep [ppr tc, nest 4 (sep (map pprParendIfaceType tys ++ map pprParendIfaceCoercion cos))])
+
 ppr_co ctxt_prec co
   = ppr_special_co ctxt_prec doc cos
   where (doc, cos) = case co of
@@ -352,7 +357,11 @@ ppr_special_co ctxt_prec doc cos
                (sep [doc, nest 4 (sep (map pprParendIfaceCoercion cos))])
 
 ppr_role :: Role -> SDoc
-ppr_role r = underscore <> ppr r
+ppr_role r = underscore <> pp_role
+  where pp_role = case r of
+                    Nominal          -> char 'N'
+                    Representational -> char 'R'
+                    Phantom          -> char 'P'
 
 -------------------
 instance Outputable IfaceTyCon where
@@ -382,14 +391,14 @@ instance Binary IfaceTyLit where
          _ -> panic ("get IfaceTyLit " ++ show tag)
 
 -------------------
-pprIfaceContext :: Outputable a => [a] -> SDoc
+pprIfaceContextArr :: Outputable a => [a] -> SDoc
 -- Prints "(C a, D b) =>", including the arrow
-pprIfaceContext []    = empty
-pprIfaceContext theta = ppr_preds theta <+> darrow
+pprIfaceContextArr []    = empty
+pprIfaceContextArr theta = pprIfaceContext theta <+> darrow
 
-ppr_preds :: Outputable a => [a] -> SDoc
-ppr_preds [pred] = ppr pred    -- No parens
-ppr_preds preds  = parens (sep (punctuate comma (map ppr preds)))
+pprIfaceContext :: Outputable a => [a] -> SDoc
+pprIfaceContext [pred] = ppr pred    -- No parens
+pprIfaceContext preds  = parens (sep (punctuate comma (map ppr preds)))
 
 instance Binary IfaceType where
     put_ bh (IfaceForAllTy aa ab) = do
@@ -493,7 +502,12 @@ instance Binary IfaceCoercion where
   put_ bh (IfaceSubCo a) = do
           putByte bh 14
           put_ bh a
-  
+  put_ bh (IfaceAxiomRuleCo a b c) = do
+          putByte bh 15
+          put_ bh a
+          put_ bh b
+          put_ bh c
+
   get bh = do
       tag <- getByte bh
       case tag of
@@ -540,6 +554,10 @@ instance Binary IfaceCoercion where
                    return $ IfaceInstCo a b
            14-> do a <- get bh
                    return $ IfaceSubCo a
+           15-> do a <- get bh
+                   b <- get bh
+                   c <- get bh
+                   return $ IfaceAxiomRuleCo a b c
            _ -> panic ("get IfaceCoercion " ++ show tag)             
 
 \end{code}
@@ -629,5 +647,9 @@ toIfaceCoercion (InstCo co ty)      = IfaceInstCo (toIfaceCoercion co)
                                                   (toIfaceType ty)
 toIfaceCoercion (SubCo co)          = IfaceSubCo (toIfaceCoercion co)
 
+toIfaceCoercion (AxiomRuleCo co ts cs) = IfaceAxiomRuleCo
+                                          (coaxrName co)
+                                          (map toIfaceType ts)
+                                          (map toIfaceCoercion cs)
 \end{code}
 

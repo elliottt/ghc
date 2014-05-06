@@ -7,34 +7,50 @@ TcSplice: Template Haskell splices
 
 
 \begin{code}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module TcSplice( tcSpliceType, tcSpliceExpr, tcSpliceDecls, tcBracket,
-                 lookupThName_maybe,
-                 runQuasiQuoteExpr, runQuasiQuotePat,
-                 runQuasiQuoteDecl, runQuasiQuoteType,
-                 runAnnotation ) where
+module TcSplice(
+     -- These functions are defined in stage1 and stage2
+     -- The raise civilised errors in stage1
+     tcSpliceExpr, tcTypedBracket, tcUntypedBracket,
+     runQuasiQuoteExpr, runQuasiQuotePat,
+     runQuasiQuoteDecl, runQuasiQuoteType,
+     runAnnotation,
+
+#ifdef GHCI
+     -- These ones are defined only in stage2, and are
+     -- called only in stage2 (ie GHCI is on)
+     runMetaE, runMetaP, runMetaT, runMetaD, runQuasi,
+     tcTopSpliceExpr, lookupThName_maybe,
+#endif
+      ) where
 
 #include "HsVersions.h"
 
+import HsSyn
+import Annotations
+import Name
+import TcRnMonad
+import RdrName
+import TcType
+
+#ifdef GHCI
 import HscMain
-import TcRnDriver
         -- These imports are the reason that TcSplice
         -- is very high up the module hierarchy
 
-import HsSyn
+import HscTypes
 import Convert
 import RnExpr
 import RnEnv
-import RdrName
 import RnTypes
-import TcPat
 import TcExpr
 import TcHsSyn
 import TcSimplify
 import TcUnify
 import Type
 import Kind
-import TcType
+import NameSet
 import TcEnv
 import TcMType
 import TcHsType
@@ -43,52 +59,90 @@ import TypeRep
 import FamInst
 import FamInstEnv
 import InstEnv
-import Name
 import NameEnv
-import NameSet
 import PrelNames
-import HscTypes
 import OccName
+import Hooks
 import Var
 import Module
-import Annotations
-import TcRnMonad
+import LoadIface
 import Class
 import Inst
 import TyCon
 import CoAxiom
+import PatSyn ( patSynId )
+import ConLike
 import DataCon
 import TcEvidence( TcEvBinds(..) )
 import Id
 import IdInfo
-import DsMeta
 import DsExpr
 import DsMonad hiding (Splice)
 import Serialized
 import ErrUtils
 import SrcLoc
-import Outputable
 import Util
 import Data.List        ( mapAccumL )
 import Unique
 import Data.Maybe
-import BasicTypes
+import BasicTypes hiding( SuccessFlag(..) )
+import Maybes( MaybeErr(..) )
 import DynFlags
 import Panic
 import FastString
-import Control.Monad    ( when, zipWithM )
+import Outputable
+import Control.Monad    ( when )
 
+import DsMeta
 import qualified Language.Haskell.TH as TH
 -- THSyntax gives access to internal functions and data types
 import qualified Language.Haskell.TH.Syntax as TH
 
-#ifdef GHCI
 -- Because GHC.Desugar might not be in the base library of the bootstrapping compiler
 import GHC.Desugar      ( AnnotationWrapper(..) )
-#endif
 
+import qualified Data.Map as Map
+import Data.Dynamic  ( fromDynamic, toDyn )
+import Data.Typeable ( typeOf )
+import Data.Data (Data)
 import GHC.Exts         ( unsafeCoerce# )
+#endif
 \end{code}
+
+%************************************************************************
+%*                                                                      *
+\subsection{Main interface + stubs for the non-GHCI case
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+tcTypedBracket   :: HsBracket Name -> TcRhoType -> TcM (HsExpr TcId)
+tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> TcRhoType -> TcM (HsExpr TcId)
+tcSpliceExpr     :: HsSplice Name  -> TcRhoType -> TcM (HsExpr TcId)
+        -- None of these functions add constraints to the LIE
+
+runQuasiQuoteExpr :: HsQuasiQuote RdrName -> RnM (LHsExpr RdrName)
+runQuasiQuotePat  :: HsQuasiQuote RdrName -> RnM (LPat RdrName)
+runQuasiQuoteType :: HsQuasiQuote RdrName -> RnM (LHsType RdrName)
+runQuasiQuoteDecl :: HsQuasiQuote RdrName -> RnM [LHsDecl RdrName]
+
+runAnnotation     :: CoreAnnTarget -> LHsExpr Name -> TcM Annotation
+
+#ifndef GHCI
+tcTypedBracket   x _   = failTH x "Template Haskell bracket"
+tcUntypedBracket x _ _ = failTH x "Template Haskell bracket"
+tcSpliceExpr  e _      = failTH e "Template Haskell splice"
+
+runQuasiQuoteExpr q = failTH q "quasiquote"
+runQuasiQuotePat  q = failTH q "pattern quasiquote"
+runQuasiQuoteType q = failTH q "type quasiquote"
+runQuasiQuoteDecl q = failTH q "declaration quasiquote"
+runAnnotation   _ q = failTH q "annotation"
+
+#else
+  -- The whole of the rest of the file is the else-branch (ie stage2 only)
+\end{code}
+
 
 Note [How top-level splices are handled]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -110,19 +164,51 @@ very straightforwardly:
 
 Note [How brackets and nested splices are handled]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Nested splices (those inside a [| .. |] quotation bracket), are treated
-quite differently.
+Nested splices (those inside a [| .. |] quotation bracket),
+are treated quite differently.
 
-  * After typechecking, the bracket [| |] carries
+Remember, there are two forms of bracket
+         typed   [|| e ||]
+   and untyped   [|  e  |]
 
-     a) A mutable list of PendingSplice
-          type PendingSplice = (Name, LHsExpr Id)
+The life cycle of a typed bracket:
+   * Starts as HsBracket
 
-     b) The quoted expression e, *renamed*: (HsExpr Name)
-          The expression e has been typechecked, but the result of
-          that typechecking is discarded.
+   * When renaming:
+        * Set the ThStage to (Brack s RnPendingTyped)
+        * Rename the body
+        * Result is still a HsBracket
 
-  * The brakcet is desugared by DsMeta.dsBracket.  It
+   * When typechecking:
+        * Set the ThStage to (Brack s (TcPending ps_var lie_var))
+        * Typecheck the body, and throw away the elaborated result
+        * Nested splices (which must be typed) are typechecked, and
+          the results accumulated in ps_var; their constraints
+          accumulate in lie_var
+        * Result is a HsTcBracketOut rn_brack pending_splices
+          where rn_brack is the incoming renamed bracket
+
+The life cycle of a un-typed bracket:
+   * Starts as HsBracket
+
+   * When renaming:
+        * Set the ThStage to (Brack s (RnPendingUntyped ps_var))
+        * Rename the body
+        * Nested splices (which must be untyped) are renamed, and the
+          results accumulated in ps_var
+        * Result is still (HsRnBracketOut rn_body pending_splices)
+
+   * When typechecking a HsRnBracketOut
+        * Typecheck the pending_splices individually
+        * Ignore the body of the bracket; just check that the context
+          expects a bracket of that type (e.g. a [p| pat |] bracket should
+          be in a context needing a (Q Pat)
+        * Result is a HsTcBracketOut rn_brack pending_splices
+          where rn_brack is the incoming renamed bracket
+
+
+In both cases, desugaring happens like this:
+  * HsTcBracketOut is desugared by DsMeta.dsBracket.  It
 
       a) Extends the ds_meta environment with the PendingSplices
          attached to the bracket
@@ -136,17 +222,6 @@ quite differently.
   * Each splice carries a unique Name, called a "splice point", thus
     ${n}(e).  The name is initialised to an (Unqual "splice") when the
     splice is created; the renamer gives it a unique.
-
-  * When the type checker type-checks a nested splice ${n}(e), it
-        - typechecks e
-        - adds the typechecked expression (of type (HsExpr Id))
-          as a pending splice to the enclosing bracket
-        - returns something non-committal
-    Eg for [| f ${n}(g x) |], the typechecker
-        - attaches the typechecked term (g x) to the pending splices for n
-          in the outer bracket
-        - returns a non-committal type \alpha.
-        Remember that the bracket discards the typechecked term altogether
 
   * When DsMeta (used to desugar the body of the bracket) comes across
     a splice, it looks up the splice's Name, n, in the ds_meta envt,
@@ -203,6 +278,9 @@ Note [Template Haskell levels]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * Imported things are impLevel (= 0)
 
+* However things at level 0 are not *necessarily* imported.
+      eg  $( \b -> ... )   here b is bound at level 0
+
 * In GHCi, variables bound by a previous command are treated
   as impLevel, because we have bytecode for them.
 
@@ -235,85 +313,13 @@ When a variable is used, we compare
     - Non-top-level     Only if there is a liftable instance
                                 h = \(x:Int) -> [| x |]
 
-See Note [What is a top-level Id?]
+  To track top-level-ness we use the ThBindEnv in TcLclEnv
 
-Note [Quoting names]
-~~~~~~~~~~~~~~~~~~~~
-A quoted name 'n is a bit like a quoted expression [| n |], except that we
-have no cross-stage lifting (c.f. TcExpr.thBrackId).  So, after incrementing
-the use-level to account for the brackets, the cases are:
+  For example:
+           f = ...
+           g1 = $(map ...)         is OK
+           g2 = $(f ...)           is not OK; because we havn't compiled f yet
 
-        bind > use                      Error
-        bind = use                      OK
-        bind < use
-                Imported things         OK
-                Top-level things        OK
-                Non-top-level           Error
-
-See Note [What is a top-level Id?] in TcEnv.  Examples:
-
-  f 'map        -- OK; also for top-level defns of this module
-
-  \x. f 'x      -- Not ok (whereas \x. f [| x |] might have been ok, by
-                --                               cross-stage lifting
-
-  \y. [| \x. $(f 'y) |] -- Not ok (same reason)
-
-  [| \x. $(f 'x) |]     -- OK
-
-
-Note [What is a top-level Id?]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In the level-control criteria above, we need to know what a "top level Id" is.
-There are three kinds:
-  * Imported from another module                (GlobalId, ExternalName)
-  * Bound at the top level of this module       (ExternalName)
-  * In GHCi, bound by a previous stmt           (GlobalId)
-It's strange that there is no one criterion tht picks out all three, but that's
-how it is right now.  (The obvious thing is to give an ExternalName to GHCi Ids
-bound in an earlier Stmt, but what module would you choose?  See
-Note [Interactively-bound Ids in GHCi] in TcRnDriver.)
-
-The predicate we use is TcEnv.thTopLevelId.
-
-
-%************************************************************************
-%*                                                                      *
-\subsection{Main interface + stubs for the non-GHCI case
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
-tcBracket     :: HsBracket Name -> TcRhoType -> TcM (HsExpr TcId)
-tcSpliceDecls :: LHsExpr Name -> TcM [LHsDecl RdrName]
-tcSpliceExpr  :: HsSplice Name -> TcRhoType -> TcM (HsExpr TcId)
-tcSpliceType  :: HsSplice Name -> FreeVars -> TcM (TcType, TcKind)
-        -- None of these functions add constraints to the LIE
-
-lookupThName_maybe :: TH.Name -> TcM (Maybe Name)
-
-runQuasiQuoteExpr :: HsQuasiQuote RdrName -> RnM (LHsExpr RdrName)
-runQuasiQuotePat  :: HsQuasiQuote RdrName -> RnM (LPat RdrName)
-runQuasiQuoteType :: HsQuasiQuote RdrName -> RnM (LHsType RdrName)
-runQuasiQuoteDecl :: HsQuasiQuote RdrName -> RnM [LHsDecl RdrName]
-
-runAnnotation     :: CoreAnnTarget -> LHsExpr Name -> TcM Annotation
-
-#ifndef GHCI
-tcBracket     x _ = pprPanic "Cant do tcBracket without GHCi"     (ppr x)
-tcSpliceExpr  e   = pprPanic "Cant do tcSpliceExpr without GHCi"  (ppr e)
-tcSpliceDecls x   = pprPanic "Cant do tcSpliceDecls without GHCi" (ppr x)
-tcSpliceType  x fvs = pprPanic "Cant do kcSpliceType without GHCi"  (ppr x)
-
-lookupThName_maybe n = pprPanic "Cant do lookupThName_maybe without GHCi" (ppr n)
-
-runQuasiQuoteExpr q = pprPanic "Cant do runQuasiQuoteExpr without GHCi" (ppr q)
-runQuasiQuotePat  q = pprPanic "Cant do runQuasiQuotePat without GHCi" (ppr q)
-runQuasiQuoteType q = pprPanic "Cant do runQuasiQuoteType without GHCi" (ppr q)
-runQuasiQuoteDecl q = pprPanic "Cant do runQuasiQuoteDecl without GHCi" (ppr q)
-runAnnotation   _ q = pprPanic "Cant do runAnnotation without GHCi" (ppr q)
-#else
-\end{code}
 
 %************************************************************************
 %*                                                                      *
@@ -324,108 +330,83 @@ runAnnotation   _ q = pprPanic "Cant do runAnnotation without GHCi" (ppr q)
 
 \begin{code}
 -- See Note [How brackets and nested splices are handled]
-tcBracket brack res_ty
-  = addErrCtxt (hang (ptext (sLit "In the Template Haskell quotation"))
-                   2 (ppr brack)) $
-    do {        -- Check for nested brackets
-         cur_stage <- getStage
-       ; checkTc (not (isBrackStage cur_stage)) illegalBracket
+-- tcTypedBracket :: HsBracket Name -> TcRhoType -> TcM (HsExpr TcId)
+tcTypedBracket brack@(TExpBr expr) res_ty
+  = addErrCtxt (quotationCtxtDoc brack) $
+    do { cur_stage <- getStage
+       ; ps_ref <- newMutVar []
+       ; lie_var <- getConstraintVar   -- Any constraints arising from nested splices
+                                       -- should get thrown into the constraint set
+                                       -- from outside the bracket
 
-        -- Brackets are desugared to code that mentions the TH package
-       ; recordThUse
+       -- Typecheck expr to make sure it is valid,
+       -- Throw away the typechecked expression but return its type.
+       -- We'll typecheck it again when we splice it in somewhere
+       ; (_tc_expr, expr_ty) <- setStage (Brack cur_stage (TcPending ps_ref lie_var)) $
+                                tcInferRhoNC expr
+                                -- NC for no context; tcBracket does that
 
-        -- Typecheck expr to make sure it is valid,
-        -- but throw away the results.  We'll type check
-        -- it again when we actually use it.
-       ; pending_splices <- newMutVar []
-       ; lie_var <- getConstraintVar
-       ; let brack_stage = Brack cur_stage pending_splices lie_var
-
-          -- We want to check that there aren't any constraints that
-          -- can't be satisfied (e.g. Show Foo, where Foo has no Show
-          -- instance), but we aren't otherwise interested in the
-          -- results. Nor do we care about ambiguous dictionaries etc.
-          -- We will type check this bracket again at its usage site.
-          --
-          -- We build a single implication constraint with a BracketSkol;
-          -- that in turn tells simplifyTop to report only definite
-          -- errors
-       ; ((_binds1, meta_ty), lie) <- captureConstraints $
-                          newImplication BracketSkol [] [] $
-                          setStage brack_stage $
-                          tc_bracket cur_stage brack
-
-          -- It's best to simplify the constraint now, even though in
-          -- principle some later unification might be useful for it,
-          -- because we don't want these essentially-junk TH implication
-          -- constraints floating around nested inside other constraints
-          -- See for example Trac #4949
-       ; _binds2 <- simplifyTop lie
-
-        -- Return the original expression, not the type-decorated one
-       ; pendings <- readMutVar pending_splices
+       ; meta_ty <- tcTExpTy expr_ty
        ; co <- unifyType meta_ty res_ty
-       ; return (mkHsWrapCo co (HsBracketOut brack pendings)) }
+       ; ps' <- readMutVar ps_ref
+       ; texpco <- tcLookupId unsafeTExpCoerceName
+       ; return (mkHsWrapCo co (unLoc (mkHsApp (nlHsTyApp texpco [expr_ty])
+                                               (noLoc (HsTcBracketOut brack ps'))))) }
+tcTypedBracket other_brack _
+  = pprPanic "tcTypedBracket" (ppr other_brack)
 
-tc_bracket :: ThStage -> HsBracket Name -> TcM TcType
-tc_bracket outer_stage br@(VarBr _ name)     -- Note [Quoting names]
-  = do  { thing <- tcLookup name
-        ; case thing of
-            AGlobal {} -> return ()
-            ATyVar {}  -> return ()
-            ATcId { tct_level = bind_lvl, tct_id = id }
-                | thTopLevelId id       -- C.f TcExpr.checkCrossStageLifting
-                -> keepAliveTc id
-                | otherwise
-                -> do { checkTc (thLevel outer_stage + 1 == bind_lvl)
-                                (quotedNameStageErr br) }
-            _ -> pprPanic "th_bracket" (ppr name $$ ppr thing)
+-- tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> TcRhoType -> TcM (HsExpr TcId)
+tcUntypedBracket brack ps res_ty
+  = do { traceTc "tc_bracket untyped" (ppr brack $$ ppr ps)
+       ; ps' <- mapM tcPendingSplice ps
+       ; meta_ty <- tcBrackTy brack
+       ; co <- unifyType meta_ty res_ty
+       ; traceTc "tc_bracket done untyped" (ppr meta_ty)
+       ; return (mkHsWrapCo co (HsTcBracketOut brack ps'))  }
 
-        ; tcMetaTy nameTyConName        -- Result type is Var (not Q-monadic)
-        }
+---------------
+tcBrackTy :: HsBracket Name -> TcM TcType
+tcBrackTy (VarBr _ _) = tcMetaTy nameTyConName  -- Result type is Var (not Q-monadic)
+tcBrackTy (ExpBr _)   = tcMetaTy expQTyConName  -- Result type is ExpQ (= Q Exp)
+tcBrackTy (TypBr _)   = tcMetaTy typeQTyConName -- Result type is Type (= Q Typ)
+tcBrackTy (DecBrG _)  = tcMetaTy decsQTyConName -- Result type is Q [Dec]
+tcBrackTy (PatBr _)   = tcMetaTy patQTyConName  -- Result type is PatQ (= Q Pat)
+tcBrackTy (DecBrL _)  = panic "tcBrackTy: Unexpected DecBrL"
+tcBrackTy (TExpBr _)  = panic "tcUntypedBracket: Unexpected TExpBr"
 
-tc_bracket _ (ExpBr expr)
-  = do  { any_ty <- newFlexiTyVarTy openTypeKind
-        ; _ <- tcMonoExprNC expr any_ty  -- NC for no context; tcBracket does that
-        ; tcMetaTy expQTyConName }
-        -- Result type is ExpQ (= Q Exp)
+---------------
+tcPendingSplice :: PendingRnSplice -> TcM PendingTcSplice
+tcPendingSplice (PendingRnExpSplice (HsSplice n expr))
+  = do { res_ty <- tcMetaTy expQTyConName
+       ; tc_pending_splice n expr res_ty }
+tcPendingSplice (PendingRnPatSplice (HsSplice n expr))
+  = do { res_ty <- tcMetaTy patQTyConName
+       ; tc_pending_splice n expr res_ty }
+tcPendingSplice (PendingRnTypeSplice (HsSplice n expr))
+  = do { res_ty <- tcMetaTy typeQTyConName
+       ; tc_pending_splice n expr res_ty }
+tcPendingSplice (PendingRnDeclSplice (HsSplice n expr))
+  = do { res_ty <- tcMetaTy decsQTyConName
+       ; tc_pending_splice n expr res_ty }
 
-tc_bracket _ (TypBr typ)
-  = do  { _ <- tcLHsType typ    -- Do not check type validity; we can have a bracket
-                                -- inside a "knot" where things are not yet settled
-                                --    eg   data T a = MkT $(foo  [t| a |])
-        ; tcMetaTy typeQTyConName }
-        -- Result type is Type (= Q Typ)
+tcPendingSplice (PendingRnCrossStageSplice n)
+  -- Behave like $(lift x); not very pretty
+  = do { res_ty <- tcMetaTy expQTyConName
+       ; tc_pending_splice n (nlHsApp (nlHsVar liftName) (nlHsVar n)) res_ty }
 
-tc_bracket _ (DecBrG decls)
-  = do  { _ <- setXOptM Opt_ExistentialQuantification $
-                   -- This is an EGREGIOUS HACK to make T5737 work.  That test splices
-                   -- in a type in a data constructor arg type, and then we try to 
-                   -- check validity for the data type decl, which fails because of
-                   -- the pseudo-existential.  Stupid.  Will go away after the TH reorg
-               tcTopSrcDecls emptyModDetails decls
-               -- Typecheck the declarations, discarding the result
-               -- We'll get all that stuff later, when we splice it in
+---------------
+tc_pending_splice :: Name -> LHsExpr Name -> TcRhoType -> TcM PendingTcSplice
+tc_pending_splice splice_name expr res_ty
+  = do { expr' <- tcMonoExpr expr res_ty
+       ; return (splice_name, expr') }
 
-               -- Top-level declarations in the bracket get unqualified names
-               -- See Note [Top-level Names in Template Haskell decl quotes] in RnNames
-
-        ; tcMetaTy decsQTyConName } -- Result type is Q [Dec]
-
-tc_bracket _ (PatBr pat)
-  = do  { any_ty <- newFlexiTyVarTy openTypeKind
-        ; _ <- tcPat ThPatQuote pat any_ty $
-               return ()
-        ; tcMetaTy patQTyConName }
-        -- Result type is PatQ (= Q Pat)
-
-tc_bracket _ (DecBrL _)
-  = panic "tc_bracket: Unexpected DecBrL"
-
-quotedNameStageErr :: HsBracket Name -> SDoc
-quotedNameStageErr br
-  = sep [ ptext (sLit "Stage error: the non-top-level quoted name") <+> ppr br
-        , ptext (sLit "must be used at the same stage at which is is bound")]
+---------------
+-- Takes a type tau and returns the type Q (TExp tau)
+tcTExpTy :: TcType -> TcM TcType
+tcTExpTy tau = do
+    q <- tcLookupTyCon qTyConName
+    texp <- tcLookupTyCon tExpTyConName
+    return (mkTyConApp q [mkTyConApp texp [tau]])
 \end{code}
 
 
@@ -436,51 +417,73 @@ quotedNameStageErr br
 %************************************************************************
 
 \begin{code}
-tcSpliceExpr (HsSplice name expr) res_ty
-  = setSrcSpan (getLoc expr)    $ do
+tcSpliceExpr splice@(HsSplice name expr) res_ty
+  = addErrCtxt (spliceCtxtDoc splice) $
+    setSrcSpan (getLoc expr)    $ do
     { stage <- getStage
-    ; case stage of {
-        Splice -> tcTopSplice expr res_ty ;
-        Comp   -> tcTopSplice expr res_ty ;
+    ; case stage of
+        Splice {}            -> tcTopSplice expr res_ty
+        Comp                 -> tcTopSplice expr res_ty
+        Brack pop_stage pend -> tcNestedSplice pop_stage pend name expr res_ty }
 
-        Brack pop_stage ps_var lie_var -> do
+tcNestedSplice :: ThStage -> PendingStuff -> Name
+                -> LHsExpr Name -> TcRhoType -> TcM (HsExpr Id)
+    -- See Note [How brackets and nested splices are handled]
+    -- A splice inside brackets
+tcNestedSplice pop_stage (TcPending ps_var lie_var) splice_name expr res_ty
+  = do { meta_exp_ty <- tcTExpTy res_ty
+       ; expr' <- setStage pop_stage $
+                  setConstraintVar lie_var $
+                  tcMonoExpr expr meta_exp_ty
+       ; untypeq <- tcLookupId unTypeQName
+       ; let expr'' = mkHsApp (nlHsTyApp untypeq [res_ty]) expr'
+       ; ps <- readMutVar ps_var
+       ; writeMutVar ps_var ((splice_name, expr'') : ps)
 
-        -- See Note [How brackets and nested splices are handled]
-        -- A splice inside brackets
-        -- NB: ignore res_ty, apart from zapping it to a mono-type
-        -- e.g.   [| reverse $(h 4) |]
-        -- Here (h 4) :: Q Exp
-        -- but $(h 4) :: forall a.a     i.e. anything!
+       -- The returned expression is ignored; it's in the pending splices
+       ; return (panic "tcSpliceExpr") }
 
-     { meta_exp_ty <- tcMetaTy expQTyConName
-     ; expr' <- setStage pop_stage $
-                setConstraintVar lie_var    $
-                tcMonoExpr expr meta_exp_ty
-
-        -- Write the pending splice into the bucket
-     ; ps <- readMutVar ps_var
-     ; writeMutVar ps_var ((name,expr') : ps)
-
-     ; return (panic "tcSpliceExpr")    -- The returned expression is ignored
-     }}}
+tcNestedSplice _ _ splice_name _ _
+  = pprPanic "tcNestedSplice: rename stage found" (ppr splice_name)
 
 tcTopSplice :: LHsExpr Name -> TcRhoType -> TcM (HsExpr Id)
--- Note [How top-level splices are handled]
 tcTopSplice expr res_ty
-  = do { meta_exp_ty <- tcMetaTy expQTyConName
+  = do { -- Typecheck the expression,
+         -- making sure it has type Q (T res_ty)
+         meta_exp_ty <- tcTExpTy res_ty
+       ; zonked_q_expr <- tcTopSpliceExpr True $
+                          tcMonoExpr expr meta_exp_ty
 
-        -- Typecheck the expression
-       ; zonked_q_expr <- tcTopSpliceExpr (tcMonoExpr expr meta_exp_ty)
-
-        -- Run the expression
+         -- Run the expression
        ; expr2 <- runMetaE zonked_q_expr
        ; showSplice "expression" expr (ppr expr2)
 
+         -- Rename and typecheck the spliced-in expression,
+         -- making sure it has type res_ty
+         -- These steps should never fail; this is a *typed* splice
        ; addErrCtxt (spliceResultDoc expr) $ do
-       { (exp3, _fvs) <- checkNoErrs $ rnLExpr expr2
-                         -- checkNoErrs: see Note [Renamer errors]
+       { (exp3, _fvs) <- rnLExpr expr2
        ; exp4 <- tcMonoExpr exp3 res_ty
        ; return (unLoc exp4) } }
+\end{code}
+
+
+%************************************************************************
+%*                                                                      *
+\subsection{Error messages}
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+quotationCtxtDoc :: HsBracket Name -> SDoc
+quotationCtxtDoc br_body
+  = hang (ptext (sLit "In the Template Haskell quotation"))
+         2 (ppr br_body)
+
+spliceCtxtDoc :: HsSplice Name -> SDoc
+spliceCtxtDoc splice
+  = hang (ptext (sLit "In the Template Haskell splice"))
+         2 (pprTypedSplice splice)
 
 spliceResultDoc :: LHsExpr Name -> SDoc
 spliceResultDoc expr
@@ -489,7 +492,7 @@ spliceResultDoc expr
         , ptext (sLit "To see what the splice expanded to, use -ddump-splices")]
 
 -------------------
-tcTopSpliceExpr :: TcM (LHsExpr Id) -> TcM (LHsExpr Id)
+tcTopSpliceExpr :: Bool -> TcM (LHsExpr Id) -> TcM (LHsExpr Id)
 -- Note [How top-level splices are handled]
 -- Type check an expression that is the body of a top-level splice
 --   (the caller will compile and run it)
@@ -499,7 +502,7 @@ tcTopSpliceExpr :: TcM (LHsExpr Id) -> TcM (LHsExpr Id)
 -- The recursive call to tcMonoExpr will simply expand the
 -- inner escape before dealing with the outer one
 
-tcTopSpliceExpr tc_action
+tcTopSpliceExpr isTypedSplice tc_action
   = checkNoErrs $  -- checkNoErrs: must not try to run the thing
                    -- if the type checker fails!
     unsetGOptM Opt_DeferTypeErrors $
@@ -508,7 +511,7 @@ tcTopSpliceExpr tc_action
                    -- coerce, so we get a seg-fault if, say we
                    -- splice a type into a place where an expression
                    -- is expected (Trac #7276)
-    setStage Splice $
+    setStage (Splice isTypedSplice) $
     do {    -- Typecheck the expression
          (expr', lie) <- captureConstraints tc_action
 
@@ -529,86 +532,6 @@ We don't want the type checker to see these bogus unbound variables.
 
 %************************************************************************
 %*                                                                      *
-                Splicing a type
-%*                                                                      *
-%************************************************************************
-
-Very like splicing an expression, but we don't yet share code.
-
-\begin{code}
-tcSpliceType (HsSplice name hs_expr) _
-  = setSrcSpan (getLoc hs_expr) $ do
-    { stage <- getStage
-    ; case stage of {
-        Splice -> tcTopSpliceType hs_expr ;
-        Comp   -> tcTopSpliceType hs_expr ;
-
-        Brack pop_level ps_var lie_var -> do
-           -- See Note [How brackets and nested splices are handled]
-           -- A splice inside brackets
-    { meta_ty <- tcMetaTy typeQTyConName
-    ; expr' <- setStage pop_level $
-               setConstraintVar lie_var $
-               tcMonoExpr hs_expr meta_ty
-
-        -- Write the pending splice into the bucket
-    ; ps <- readMutVar ps_var
-    ; writeMutVar ps_var ((name,expr') : ps)
-
-    -- e.g.   [| f (g :: Int -> $(h 4)) |]
-    -- Here (h 4) :: Q Type
-    -- but $(h 4) :: a  i.e. any type, of any kind
-
-    ; kind <- newMetaKindVar
-    ; ty <- newFlexiTyVarTy kind
-    ; return (ty, kind)
-    }}}
-
-tcTopSpliceType :: LHsExpr Name -> TcM (TcType, TcKind)
--- Note [How top-level splices are handled]
-tcTopSpliceType expr
-  = do  { meta_ty <- tcMetaTy typeQTyConName
-
-        -- Typecheck the expression
-        ; zonked_q_expr <- tcTopSpliceExpr (tcMonoExpr expr meta_ty)
-
-        -- Run the expression
-        ; hs_ty2 <- runMetaT zonked_q_expr
-        ; showSplice "type" expr (ppr hs_ty2)
-  
-        ; addErrCtxt (spliceResultDoc expr) $ do 
-        { let doc = SpliceTypeCtx hs_ty2
-        ; (hs_ty3, _fvs) <- checkNoErrs $ rnLHsType doc hs_ty2
-                         -- checkNoErrs: see Note [Renamer errors]
-        ; tcLHsType hs_ty3 }}
-\end{code}
-
-%************************************************************************
-%*                                                                      *
-\subsection{Splicing an expression}
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
--- Note [How top-level splices are handled]
--- Always at top level
--- Type sig at top of file:
---      tcSpliceDecls :: LHsExpr Name -> TcM [LHsDecl RdrName]
-tcSpliceDecls expr
-  = do  { list_q <- tcMetaTy decsQTyConName     -- Q [Dec]
-        ; zonked_q_expr <- tcTopSpliceExpr (tcMonoExpr expr list_q)
-
-                -- Run the expression
-        ; decls <- runMetaD zonked_q_expr
-        ; showSplice "declarations" expr
-                     (ppr (getLoc expr) $$ (vcat (map ppr decls)))
-
-        ; return decls }
-\end{code}
-
-
-%************************************************************************
-%*                                                                      *
         Annotations
 %*                                                                      *
 %************************************************************************
@@ -623,7 +546,7 @@ runAnnotation target expr = do
     -- Check the instances we require live in another module (we want to execute it..)
     -- and check identifiers live in other modules using TH stage checks. tcSimplifyStagedExpr
     -- also resolves the LIE constraints to detect e.g. instance ambiguity
-    zonked_wrapped_expr' <- tcTopSpliceExpr $
+    zonked_wrapped_expr' <- tcTopSpliceExpr False $
            do { (expr', expr_ty) <- tcInferRhoNC expr
                 -- We manually wrap the typechecked expression in a call to toAnnotationWrapper
                 -- By instantiating the call >here< it gets registered in the
@@ -721,17 +644,19 @@ runQuasiQuote (HsQuasiQuote quoter q_span quote) quote_selector meta_ty meta_ops
         ; checkTc (not is_local) (quoteStageError quoter')
 
         ; traceTc "runQQ" (ppr quoter <+> ppr is_local)
+        ; HsQuasiQuote quoter'' _ quote' <- getHooked runQuasiQuoteHook return >>=
+             ($ HsQuasiQuote quoter' q_span quote)
 
           -- Build the expression
-        ; let quoterExpr = L q_span $! HsVar $! quoter'
-        ; let quoteExpr = L q_span $! HsLit $! HsString quote
+        ; let quoterExpr = L q_span $! HsVar $! quoter''
+        ; let quoteExpr = L q_span $! HsLit $! HsString quote'
         ; let expr = L q_span $
                      HsApp (L q_span $
                             HsApp (L q_span (HsVar quote_selector)) quoterExpr) quoteExpr
         ; meta_exp_ty <- tcMetaTy meta_ty
 
         -- Typecheck the expression
-        ; zonked_q_expr <- tcTopSpliceExpr (tcMonoExpr expr meta_exp_ty)
+        ; zonked_q_expr <- tcTopSpliceExpr False (tcMonoExpr expr meta_exp_ty)
 
         -- Run the expression
         ; result <- runMetaQ meta_ops zonked_q_expr
@@ -762,6 +687,12 @@ deprecatedDollar quoter
 \subsection{Running an expression}
 %*                                                                      *
 %************************************************************************
+
+
+\begin{code}
+runQuasi :: TH.Q a -> TcM a
+runQuasi act = TH.runQ act
+\end{code}
 
 \begin{code}
 data MetaOps th_syn hs_syn
@@ -808,6 +739,10 @@ runMetaQ (MT { mt_show = show_th, mt_cvt = cvt }) expr
 runMetaE :: LHsExpr Id          -- Of type (Q Exp)
          -> TcM (LHsExpr RdrName)
 runMetaE = runMetaQ exprMetaOps
+
+runMetaP :: LHsExpr Id          -- Of type (Q Pat)
+         -> TcM (LPat RdrName)
+runMetaP = runMetaQ patMetaOps
 
 runMetaT :: LHsExpr Id          -- Of type (Q Type)
          -> TcM (LHsType RdrName)
@@ -910,6 +845,12 @@ like that.  Here's how it's processed:
     (qReport True s) by using addErr to add an error message to the bag of errors.
     The 'fail' in TcM raises an IOEnvFailure exception
 
+ * 'qReport' forces the message to ensure any exception hidden in unevaluated
+   thunk doesn't get into the bag of errors. Otherwise the following splice
+   will triger panic (Trac #8987):
+        $(fail undefined)
+   See also Note [Concealed TH exceptions]
+
   * So, when running a splice, we catch all exceptions; then for
         - an IOEnvFailure exception, we assume the error is already
                 in the error-bag (above)
@@ -940,8 +881,10 @@ instance TH.Quasi (IOEnv (Env TcGblEnv TcLclEnv)) where
                   ; let i = getKey u
                   ; return (TH.mkNameU s i) }
 
-  qReport True msg  = addErr  (text msg)
-  qReport False msg = addWarn (text msg)
+  -- 'msg' is forced to ensure exceptions don't escape,
+  -- see Note [Exceptions in TH]
+  qReport True msg  = seqList msg $ addErr  (text msg)
+  qReport False msg = seqList msg $ addWarn (text msg)
 
   qLocation = do { m <- getModule
                  ; l <- getSrcSpanM
@@ -955,9 +898,12 @@ instance TH.Quasi (IOEnv (Env TcGblEnv TcLclEnv)) where
                                   , TH.loc_start = (srcSpanStartLine r, srcSpanStartCol r)
                                   , TH.loc_end = (srcSpanEndLine   r, srcSpanEndCol   r) }) }
 
-  qLookupName     = lookupName
-  qReify          = reify
-  qReifyInstances = reifyInstances
+  qLookupName       = lookupName
+  qReify            = reify
+  qReifyInstances   = reifyInstances
+  qReifyRoles       = reifyRoles
+  qReifyAnnotations = reifyAnnotations
+  qReifyModule      = reifyModule
 
         -- For qRecover, discard error messages if
         -- the recovery action is chosen.  Otherwise
@@ -975,6 +921,51 @@ instance TH.Quasi (IOEnv (Env TcGblEnv TcLclEnv)) where
     ref <- fmap tcg_dependent_files getGblEnv
     dep_files <- readTcRef ref
     writeTcRef ref (fp:dep_files)
+
+  qAddTopDecls thds = do
+      l <- getSrcSpanM
+      let either_hval = convertToHsDecls l thds
+      ds <- case either_hval of
+              Left exn -> pprPanic "qAddTopDecls: can't convert top-level declarations" exn
+              Right ds -> return ds
+      mapM_ (checkTopDecl . unLoc) ds
+      th_topdecls_var <- fmap tcg_th_topdecls getGblEnv
+      updTcRef th_topdecls_var (\topds -> ds ++ topds)
+    where
+      checkTopDecl :: HsDecl RdrName -> TcM ()
+      checkTopDecl (ValD binds)
+        = mapM_ bindName (collectHsBindBinders binds)
+      checkTopDecl (SigD _)
+        = return ()
+      checkTopDecl (ForD (ForeignImport (L _ name) _ _ _))
+        = bindName name
+      checkTopDecl _
+        = addErr $ text "Only function, value, and foreign import declarations may be added with addTopDecl"
+
+      bindName :: RdrName -> TcM ()
+      bindName (Exact n)
+        = do { th_topnames_var <- fmap tcg_th_topnames getGblEnv
+             ; updTcRef th_topnames_var (\ns -> addOneToNameSet ns n)
+             }
+
+      bindName name =
+          addErr $
+          hang (ptext (sLit "The binder") <+> quotes (ppr name) <+> ptext (sLit "is not a NameU."))
+             2 (text "Probable cause: you used mkName instead of newName to generate a binding.")
+
+  qAddModFinalizer fin = do
+      th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
+      updTcRef th_modfinalizers_var (\fins -> fin:fins)
+
+  qGetQ = do
+      th_state_var <- fmap tcg_th_state getGblEnv
+      th_state <- readTcRef th_state_var
+      let x = Map.lookup (typeOf x) th_state >>= fromDynamic
+      return x
+
+  qPutQ x = do
+      th_state_var <- fmap tcg_th_state getGblEnv
+      updTcRef th_state_var (\m -> Map.insert (typeOf x) (toDyn x) m)
 \end{code}
 
 
@@ -997,10 +988,6 @@ showSplice what before after
                             nest 2 (sep [nest 2 (ppr before),
                                          text "======>",
                                          nest 2 after])]) }
-
-illegalBracket :: SDoc
-illegalBracket = ptext (sLit "Template Haskell brackets cannot be nested (without intervening splices)")
-#endif  /* GHCI */
 \end{code}
 
 
@@ -1020,18 +1007,24 @@ reifyInstances th_nm th_tys
         ; (rn_ty, _fvs) <- checkNoErrs $ rnLHsType doc rdr_ty   -- Rename  to HsType Name
                          -- checkNoErrs: see Note [Renamer errors]
         ; (ty, _kind)  <- tcLHsType rn_ty
+        ; ty <- zonkTcTypeToType emptyZonkEnv ty   -- Substitute out the meta type variables
+                                                   -- In particular, the type might have kind
+                                                   -- variables inside it (Trac #7477)
 
+        ; traceTc "reifyInstances" (ppr ty $$ ppr (typeKind ty))
         ; case splitTyConApp_maybe ty of   -- This expands any type synonyms
             Just (tc, tys)                 -- See Trac #7910
                | Just cls <- tyConClass_maybe tc
                -> do { inst_envs <- tcGetInstEnvs
                      ; let (matches, unifies, _) = lookupInstEnv inst_envs cls tys
+                     ; traceTc "reifyInstances1" (ppr matches)
                      ; mapM reifyClassInstance (map fst matches ++ unifies) }
                | isOpenFamilyTyCon tc
                -> do { inst_envs <- tcGetFamInstEnvs
                      ; let matches = lookupFamInstEnv inst_envs tc tys
+                     ; traceTc "reifyInstances2" (ppr matches)
                      ; mapM (reifyFamilyInstance . fim_instance) matches }
-            _  -> bale_out (hang (ptext (sLit "reifyInstances:") <+> quotes (ppr ty)) 
+            _  -> bale_out (hang (ptext (sLit "reifyInstances:") <+> quotes (ppr ty))
                                2 (ptext (sLit "is not a class constraint or type family application"))) }
   where
     doc = ClassInstanceCtx
@@ -1104,6 +1097,7 @@ lookupThName th_name = do
         Nothing   -> failWithTc (notInScope th_name)
         Just name -> return name
 
+lookupThName_maybe :: TH.Name -> TcM (Maybe Name)
 lookupThName_maybe th_name
   =  do { names <- mapMaybeM lookup (thRdrNameGuesses th_name)
           -- Pick the first that works
@@ -1126,22 +1120,21 @@ tcLookupTh name
   = do  { (gbl_env, lcl_env) <- getEnvs
         ; case lookupNameEnv (tcl_env lcl_env) name of {
                 Just thing -> return thing;
-                Nothing    -> do
-        { if nameIsLocalOrFrom (tcg_mod gbl_env) name
-          then  -- It's defined in this module
-              case lookupNameEnv (tcg_type_env gbl_env) name of
-                Just thing -> return (AGlobal thing)
-                Nothing    -> failWithTc (notInEnv name)
+                Nothing    ->
 
-          else do               -- It's imported
-        { (eps,hpt) <- getEpsAndHpt
-        ; dflags <- getDynFlags
-        ; case lookupType dflags hpt (eps_PTE eps) name of
-            Just thing -> return (AGlobal thing)
-            Nothing    -> do { thing <- tcImportDecl name
-                             ; return (AGlobal thing) }
-                -- Imported names should always be findable;
-                -- if not, we fail hard in tcImportDecl
+          case lookupNameEnv (tcg_type_env gbl_env) name of {
+                Just thing -> return (AGlobal thing);
+                Nothing    ->
+
+          if nameIsLocalOrFrom (tcg_mod gbl_env) name
+          then  -- It's defined in this module
+                failWithTc (notInEnv name)
+
+          else
+     do { mb_thing <- tcLookupImported_maybe name
+        ; case mb_thing of
+            Succeeded thing -> return (AGlobal thing)
+            Failed msg      -> failWithTc msg
     }}}}
 
 notInScope :: TH.Name -> SDoc
@@ -1152,6 +1145,19 @@ notInScope th_name = quotes (text (TH.pprint th_name)) <+>
 notInEnv :: Name -> SDoc
 notInEnv name = quotes (ppr name) <+>
                      ptext (sLit "is not in the type environment at a reify")
+
+------------------------------
+reifyRoles :: TH.Name -> TcM [TH.Role]
+reifyRoles th_name
+  = do { thing <- getThing th_name
+       ; case thing of
+           AGlobal (ATyCon tc) -> return (map reify_role (tyConRoles tc))
+           _ -> failWithTc (ptext (sLit "No roles associated with") <+> (ppr thing))
+       }
+  where
+    reify_role Nominal          = TH.NominalR
+    reify_role Representational = TH.RepresentationalR
+    reify_role Phantom          = TH.PhantomR
 
 ------------------------------
 reifyThing :: TcTyThing -> TcM TH.Info
@@ -1169,13 +1175,15 @@ reifyThing (AGlobal (AnId id))
     }
 
 reifyThing (AGlobal (ATyCon tc))   = reifyTyCon tc
-reifyThing (AGlobal (ADataCon dc))
+reifyThing (AGlobal (AConLike (RealDataCon dc)))
   = do  { let name = dataConName dc
         ; ty <- reifyType (idType (dataConWrapId dc))
         ; fix <- reifyFixity name
         ; return (TH.DataConI (reifyName name) ty
                               (reifyName (dataConOrigTyCon dc)) fix)
         }
+reifyThing (AGlobal (AConLike (PatSynCon ps)))
+  = noTH (sLit "pattern synonyms") (ppr $ patSynId ps)
 
 reifyThing (ATcId {tct_id = id})
   = do  { ty1 <- zonkTcType (idType id) -- Make use of all the info we have, even
@@ -1194,7 +1202,8 @@ reifyThing thing = pprPanic "reifyThing" (pprTcTyThingCategory thing)
 -------------------------------------------
 reifyAxBranch :: CoAxBranch -> TcM TH.TySynEqn
 reifyAxBranch (CoAxBranch { cab_lhs = args, cab_rhs = rhs })
-  = do { args' <- mapM reifyType args
+            -- remove kind patterns (#8884)
+  = do { args' <- mapM reifyType (filter (not . isKind) args)
        ; rhs'  <- reifyType rhs
        ; return (TH.TySynEqn args' rhs') }
 
@@ -1210,12 +1219,17 @@ reifyTyCon tc
   = return (TH.PrimTyConI (reifyName tc) (tyConArity tc) (isUnLiftedTyCon tc))
 
   | isFamilyTyCon tc
-  = do { let tvs     = tyConTyVars tc
-             kind    = tyConKind tc
-       ; kind' <- if isLiftedTypeKind kind then return Nothing
-                  else fmap Just (reifyKind kind)
+  = do { let tvs      = tyConTyVars tc
+             kind     = tyConKind tc
 
-       ; tvs' <- reifyTyVars tvs Nothing
+             -- we need the *result kind* (see #8884)
+             (kvs, mono_kind) = splitForAllTys kind
+                                -- tyConArity includes *kind* params
+             (_, res_kind)    = splitKindFunTysN (tyConArity tc - length kvs)
+                                                 mono_kind
+       ; kind' <- fmap Just (reifyKind res_kind)
+
+       ; tvs' <- reifyTyVars tvs
        ; flav' <- reifyFamFlavour tc
        ; case flav' of
          { Left flav ->  -- open type/data family
@@ -1231,7 +1245,7 @@ reifyTyCon tc
 
   | Just (tvs, rhs) <- synTyConDefn_maybe tc  -- Vanilla type synonym
   = do { rhs' <- reifyType rhs
-       ; tvs' <- reifyTyVars tvs (Just $ tyConRoles tc)
+       ; tvs' <- reifyTyVars tvs
        ; return (TH.TyConI
                    (TH.TySynD (reifyName tc) tvs' rhs'))
        }
@@ -1240,7 +1254,7 @@ reifyTyCon tc
   = do  { cxt <- reifyCxt (tyConStupidTheta tc)
         ; let tvs = tyConTyVars tc
         ; cons <- mapM (reifyDataCon (mkTyVarTys tvs)) (tyConDataCons tc)
-        ; r_tvs <- reifyTyVars tvs (Just $ tyConRoles tc)
+        ; r_tvs <- reifyTyVars tvs
         ; let name = reifyName tc
               deriv = []        -- Don't know about deriving
               decl | isNewTyCon tc = TH.NewtypeD cxt name r_tvs (head cons) deriv
@@ -1276,7 +1290,7 @@ reifyDataCon tys dc
              return main_con
          else do
          { cxt <- reifyCxt theta'
-         ; ex_tvs'' <- reifyTyVars ex_tvs' Nothing
+         ; ex_tvs'' <- reifyTyVars ex_tvs'
          ; return (TH.ForallC ex_tvs'' cxt main_con) } }
 
 ------------------------------
@@ -1286,7 +1300,7 @@ reifyClass cls
         ; inst_envs <- tcGetInstEnvs
         ; insts <- mapM reifyClassInstance (InstEnv.classInstances inst_envs cls)
         ; ops <- mapM reify_op op_stuff
-        ; tvs' <- reifyTyVars tvs (Just $ tyConRoles (classTyCon cls))
+        ; tvs' <- reifyTyVars tvs
         ; let dec = TH.ClassD cxt (reifyName cls) tvs' fds' ops
         ; return (TH.ClassI dec insts ) }
   where
@@ -1309,13 +1323,14 @@ reifyClassInstance i
 
 ------------------------------
 reifyFamilyInstance :: FamInst -> TcM TH.Dec
-reifyFamilyInstance (FamInst { fi_flavor = flavor 
+reifyFamilyInstance (FamInst { fi_flavor = flavor
                              , fi_fam = fam
                              , fi_tys = lhs
                              , fi_rhs = rhs })
   = case flavor of
       SynFamilyInst ->
-        do { th_lhs <- reifyTypes lhs
+               -- remove kind patterns (#8884)
+        do { th_lhs <- reifyTypes (filter (not . isKind) lhs)
            ; th_rhs <- reifyType  rhs
            ; return (TH.TySynInstD (reifyName fam) (TH.TySynEqn th_lhs th_rhs)) }
 
@@ -1344,7 +1359,7 @@ reify_for_all :: TypeRep.Type -> TcM TH.Type
 reify_for_all ty
   = do { cxt' <- reifyCxt cxt;
        ; tau' <- reifyType tau
-       ; tvs' <- reifyTyVars tvs Nothing
+       ; tvs' <- reifyTyVars tvs
        ; return (TH.ForallT tvs' cxt' tau') }
   where
     (tvs, cxt, tau) = tcSplitSigmaTy ty
@@ -1399,13 +1414,13 @@ reifyFamFlavour tc
   | Just ax <- isClosedSynFamilyTyCon_maybe tc
   = do { eqns <- brListMapM reifyAxBranch $ coAxiomBranches ax
        ; return $ Right eqns }
-                   
+
   | otherwise
   = panic "TcSplice.reifyFamFlavour: not a type family"
 
-reifyTyVars :: [TyVar] -> Maybe [Role]  -- use Nothing if role annot.s are not allowed
+reifyTyVars :: [TyVar]
             -> TcM [TH.TyVarBndr]
-reifyTyVars tvs Nothing = mapM reify_tv $ filter isTypeVar tvs
+reifyTyVars tvs = mapM reify_tv $ filter isTypeVar tvs
   where
     reify_tv tv | isLiftedTypeKind kind = return (TH.PlainTV  name)
                 | otherwise             = do kind' <- reifyKind kind
@@ -1413,23 +1428,6 @@ reifyTyVars tvs Nothing = mapM reify_tv $ filter isTypeVar tvs
       where
         kind = tyVarKind tv
         name = reifyName tv
-
-reifyTyVars tvs (Just roles) = zipWithM reify_tv tvs' roles'
-  where
-    (kvs, tvs') = span isKindVar tvs
-    roles'      = dropList kvs roles
-
-    reify_tv tv role
-      | isLiftedTypeKind kind = return (TH.RoledTV name role')
-      | otherwise             = do kind' <- reifyKind kind
-                                   return (TH.KindedRoledTV name kind' role')
-      where
-        kind  = tyVarKind tv
-        name  = reifyName tv
-        role' = case role of
-                  CoAxiom.Nominal          -> TH.Nominal
-                  CoAxiom.Representational -> TH.Representational
-                  CoAxiom.Phantom          -> TH.Phantom
 
 reify_tc_app :: TyCon -> [TypeRep.Type] -> TcM TH.Type
 reify_tc_app tc tys
@@ -1443,6 +1441,7 @@ reify_tc_app tc tys
          | tc `hasKey` listTyConKey   = TH.ListT
          | tc `hasKey` nilDataConKey  = TH.PromotedNilT
          | tc `hasKey` consDataConKey = TH.PromotedConsT
+         | tc `hasKey` eqTyConKey     = TH.EqualityT
          | otherwise                  = TH.ConT (reifyName tc)
     removeKinds :: Kind -> [TypeRep.Type] -> [TypeRep.Type]
     removeKinds (FunTy k1 k2) (h:t)
@@ -1458,17 +1457,7 @@ reifyPred ty
   -- We could reify the implicit paramter as a class but it seems
   -- nicer to support them properly...
   | isIPPred ty = noTH (sLit "implicit parameters") (ppr ty)
-  | otherwise
-   = case classifyPredType ty of
-  ClassPred cls tys -> do { tys' <- reifyTypes tys 
-                          ; return $ TH.ClassP (reifyName cls) tys' }
-  EqPred ty1 ty2    -> do { ty1' <- reifyType ty1
-                          ; ty2' <- reifyType ty2
-                          ; return $ TH.EqualP ty1' ty2'
-                          }
-  TuplePred _ -> noTH (sLit "tuple predicates") (ppr ty)
-  IrredPred _ -> noTH (sLit "irreducible predicates") (ppr ty)
-
+  | otherwise   = reifyType ty
 
 ------------------------------
 reifyName :: NamedThing n => n -> TH.Name
@@ -1511,6 +1500,49 @@ reifyStrict HsStrict                      = TH.IsStrict
 reifyStrict (HsUnpack {})                 = TH.Unpacked
 
 ------------------------------
+lookupThAnnLookup :: TH.AnnLookup -> TcM CoreAnnTarget
+lookupThAnnLookup (TH.AnnLookupName th_nm) = fmap NamedTarget (lookupThName th_nm)
+lookupThAnnLookup (TH.AnnLookupModule (TH.Module pn mn))
+  = return $ ModuleTarget $
+    mkModule (stringToPackageId $ TH.pkgString pn) (mkModuleName $ TH.modString mn)
+
+reifyAnnotations :: Data a => TH.AnnLookup -> TcM [a]
+reifyAnnotations th_name
+  = do { name <- lookupThAnnLookup th_name
+       ; topEnv <- getTopEnv
+       ; epsHptAnns <- liftIO $ prepareAnnotations topEnv Nothing
+       ; tcg <- getGblEnv
+       ; let selectedEpsHptAnns = findAnns deserializeWithData epsHptAnns name
+       ; let selectedTcgAnns = findAnns deserializeWithData (tcg_ann_env tcg) name
+       ; return (selectedEpsHptAnns ++ selectedTcgAnns) }
+
+------------------------------
+modToTHMod :: Module -> TH.Module
+modToTHMod m = TH.Module (TH.PkgName $ packageIdString  $ modulePackageId m)
+                         (TH.ModName $ moduleNameString $ moduleName m)
+
+reifyModule :: TH.Module -> TcM TH.ModuleInfo
+reifyModule (TH.Module (TH.PkgName pkgString) (TH.ModName mString)) = do
+  this_mod <- getModule
+  let reifMod = mkModule (stringToPackageId pkgString) (mkModuleName mString)
+  if (reifMod == this_mod) then reifyThisModule else reifyFromIface reifMod
+    where
+      reifyThisModule = do
+        usages <- fmap (map modToTHMod . moduleEnvKeys . imp_mods) getImports
+        return $ TH.ModuleInfo usages
+
+      reifyFromIface reifMod = do
+        iface <- loadInterfaceForModule (ptext (sLit "reifying module from TH for") <+> ppr reifMod) reifMod
+        let usages = [modToTHMod m | usage <- mi_usages iface,
+                                     Just m <- [usageToModule (modulePackageId reifMod) usage] ]
+        return $ TH.ModuleInfo usages
+
+      usageToModule :: PackageId -> Usage -> Maybe Module
+      usageToModule _ (UsageFile {}) = Nothing
+      usageToModule this_pkg (UsageHomeModule { usg_mod_name = mn }) = Just $ mkModule this_pkg mn
+      usageToModule _ (UsagePackageModule { usg_mod = m }) = Just m
+
+------------------------------
 mkThAppTs :: TH.Type -> [TH.Type] -> TH.Type
 mkThAppTs fun_ty arg_tys = foldl TH.AppT fun_ty arg_tys
 
@@ -1538,3 +1570,6 @@ will appear in TH syntax like this
   data T a = forall b. (a ~ [b]) => MkT1 b
            | (a ~ Int) => MkT2
 
+\begin{code}
+#endif  /* GHCI */
+\end{code}

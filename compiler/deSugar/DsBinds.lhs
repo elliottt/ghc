@@ -14,7 +14,7 @@ lower levels it is preserved with @let@/@letrec@s).
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
@@ -49,7 +49,7 @@ import TcEvidence
 import TcType
 import Type
 import Coercion hiding (substCo)
-import TysWiredIn ( eqBoxDataCon, tupleCon )
+import TysWiredIn ( eqBoxDataCon, coercibleDataCon, tupleCon )
 import Id
 import Class
 import DataCon	( dataConWorkId )
@@ -65,7 +65,6 @@ import Maybes
 import OrdList
 import Bag
 import BasicTypes hiding ( TopLevel )
-import Pair
 import DynFlags
 import FastString
 import ErrUtils( MsgDoc )
@@ -97,8 +96,7 @@ ds_lhs_binds binds = do { ds_bs <- mapBagM dsLHsBind binds
                         ; return (foldBag appOL id nilOL ds_bs) }
 
 dsLHsBind :: LHsBind Id -> DsM (OrdList (Id,CoreExpr))
-dsLHsBind (L loc bind)
-  = putSrcSpanDs loc $ dsHsBind bind
+dsLHsBind (L loc bind) = putSrcSpanDs loc $ dsHsBind bind
 
 dsHsBind :: HsBind Id -> DsM (OrdList (Id,CoreExpr))
 
@@ -211,6 +209,8 @@ dsHsBind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
 
     add_inline :: Id -> Id    -- tran
     add_inline lcl_id = lookupVarEnv inline_env lcl_id `orElse` lcl_id
+
+dsHsBind (PatSynBind{}) = panic "dsHsBind: PatSynBind"
 
 ------------------------
 makeCorePair :: DynFlags -> Id -> Bool -> Arity -> CoreExpr -> (Id, CoreExpr)
@@ -575,75 +575,120 @@ SPEC f :: ty                [n]   INLINE [k]
 
 \begin{code}
 decomposeRuleLhs :: [Var] -> CoreExpr -> Either SDoc ([Var], Id, [CoreExpr])
--- Take apart the LHS of a RULE.  It's supposed to look like
---     /\a. f a Int dOrdInt
--- or  /\a.\d:Ord a. let { dl::Ord [a] = dOrdList a d } in f [a] dl
--- That is, the RULE binders are lambda-bound
+-- (decomposeRuleLhs bndrs lhs) takes apart the LHS of a RULE,
+-- The 'bndrs' are the quantified binders of the rules, but decomposeRuleLhs
+-- may add some extra dictionary binders (see Note [Constant rule dicts])
+--
 -- Returns Nothing if the LHS isn't of the expected shape
-decomposeRuleLhs bndrs lhs 
-  =  -- Note [Simplifying the left-hand side of a RULE]
-    case collectArgs opt_lhs of
-        (Var fn, args) -> check_bndrs fn args
+-- Note [Decomposing the left-hand side of a RULE]
+decomposeRuleLhs orig_bndrs orig_lhs
+  | not (null unbound)    -- Check for things unbound on LHS
+                          -- See Note [Unused spec binders]
+  = Left (vcat (map dead_msg unbound))
 
-        (Case scrut bndr ty [(DEFAULT, _, body)], args)
-	        | isDeadBinder bndr	-- Note [Matching seqId]
-		-> check_bndrs seqId (args' ++ args)
-		where
-		   args' = [Type (idType bndr), Type ty, scrut, body]
-	   
-	_other -> Left bad_shape_msg
+  | Var fn_var <- fun
+  , not (fn_var `elemVarSet` orig_bndr_set)
+  = Right (bndrs1, fn_var, args)
+
+  | Case scrut bndr ty [(DEFAULT, _, body)] <- fun
+  , isDeadBinder bndr	-- Note [Matching seqId]
+  , let args' = [Type (idType bndr), Type ty, scrut, body]
+  = Right (bndrs1, seqId, args' ++ args)
+
+  | otherwise 
+  = Left bad_shape_msg
  where
-   opt_lhs = simpleOptExpr lhs
+   lhs1       = drop_dicts orig_lhs
+   lhs2       = simpleOptExpr lhs1  -- See Note [Simplify rule LHS]
+   (fun,args) = collectArgs lhs2
+   lhs_fvs    = exprFreeVars lhs2
+   unbound    = filterOut (`elemVarSet` lhs_fvs) orig_bndrs
+   bndrs1     = orig_bndrs ++ extra_dict_bndrs
 
-   check_bndrs fn args
-     | null dead_bndrs = Right (extra_dict_bndrs ++ bndrs, fn, args)
-     | otherwise       = Left (vcat (map dead_msg dead_bndrs))
-     where
-       arg_fvs = exprsFreeVars args
+   orig_bndr_set = mkVarSet orig_bndrs
 
-            -- Check for dead binders: Note [Unused spec binders]
-       dead_bndrs = filterOut (`elemVarSet` arg_fvs) bndrs
-
-            -- Add extra dict binders: Note [Constant rule dicts]
-       extra_dict_bndrs = [ mkLocalId (localiseName (idName d)) (idType d)
-                          | d <- varSetElems (arg_fvs `delVarSetList` bndrs)
-         	          , isDictId d]
-
+        -- Add extra dict binders: Note [Constant rule dicts]
+   extra_dict_bndrs = [ mkLocalId (localiseName (idName d)) (idType d)
+                      | d <- varSetElems (lhs_fvs `delVarSetList` orig_bndrs)
+                      , isDictId d ]
 
    bad_shape_msg = hang (ptext (sLit "RULE left-hand side too complicated to desugar"))
-                      2 (ppr opt_lhs)
+                      2 (vcat [ text "Optimised lhs:" <+> ppr lhs2
+                              , text "Orig lhs:" <+> ppr orig_lhs])
    dead_msg bndr = hang (sep [ ptext (sLit "Forall'd") <+> pp_bndr bndr
 			     , ptext (sLit "is not bound in RULE lhs")])
-                      2 (ppr opt_lhs)
+                      2 (ppr lhs2)
    pp_bndr bndr
     | isTyVar bndr                      = ptext (sLit "type variable") <+> quotes (ppr bndr)
     | Just pred <- evVarPred_maybe bndr = ptext (sLit "constraint") <+> quotes (ppr pred)
     | otherwise                         = ptext (sLit "variable") <+> quotes (ppr bndr)
+
+   drop_dicts :: CoreExpr -> CoreExpr
+   drop_dicts (Let (NonRec d rhs) body)
+     | isDictId d
+     , not (exprFreeVars rhs `intersectsVarSet` orig_bndr_set)
+     = drop_dicts body
+   drop_dicts (Let bnd body) = Let bnd (drop_dicts body)
+   drop_dicts body           = body
 \end{code}
 
-Note [Simplifying the left-hand side of a RULE]
+Note [Decomposing the left-hand side of a RULE]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-simpleOptExpr occurrence-analyses and simplifies the lhs
-and thereby
-(a) sorts dict bindings into NonRecs and inlines them
-(b) substitute trivial lets so that they don't get in the way
-    Note that we substitute the function too; we might 
-    have this as a LHS:  let f71 = M.f Int in f71
-(c) does eta reduction
+There are several things going on here.  
+* drop_dicts: see Note [Drop dictionary bindings on rule LHS]
+* simpleOptExpr: see Note [Simplify rule LHS]
+* extra_dict_bndrs: see Note [Free rule dicts]
 
-For (c) consider the fold/build rule, which without simplification
-looked like:
-	fold k z (build (/\a. g a))  ==>  ...
-This doesn't match unless you do eta reduction on the build argument.
-Similarly for a LHS like
-	augment g (build h) 
-we do not want to get
-	augment (\a. g a) (build h)
-otherwise we don't match when given an argument like
-	augment (\a. h a a) (build h)
+Note [Drop dictionary bindings on rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+drop_dicts drops dictionary bindings on the LHS where possible.  
+   E.g.  let d:Eq [Int] = $fEqList $fEqInt in f d
+     --> f d
+   Reasoning here is that there is only one d:Eq [Int], and so we can 
+   quantify over it. That makes 'd' free in the LHS, but that is later
+   picked up by extra_dict_bndrs (Note [Dead spec binders]).
 
-NB: tcSimplifyRuleLhs is very careful not to generate complicated
-    dictionary expressions that we might have to match
+   NB 1: We can only drop the binding if the RHS doesn't bind
+         one of the orig_bndrs, which we assume occur on RHS. 
+         Example
+            f :: (Eq a) => b -> a -> a
+            {-# SPECIALISE f :: Eq a => b -> [a] -> [a] #-}
+         Here we want to end up with
+            RULE forall d:Eq a.  f ($dfEqList d) = f_spec d
+         Of course, the ($dfEqlist d) in the pattern makes it less likely
+         to match, but ther is no other way to get d:Eq a
+
+   NB 2: We do drop_dicts *before* simplOptEpxr, so that we expect all 
+         the evidence bindings to be wrapped around the outside of the
+         LHS.  (After simplOptExpr they'll usually have been inlined.)
+         dsHsWrapper does dependency analysis, so that civilised ones
+         will be simple NonRec bindings.  We don't handle recursive
+         dictionaries!
+
+   Trac #8848 is a good example of where there are some intersting
+   dictionary bindings to discard.
+
+Note [Simplify rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~
+simplOptExpr occurrence-analyses and simplifies the LHS:
+
+   (a) Inline any remaining dictionary bindings (which hopefully 
+       occur just once)
+
+   (b) Substitute trivial lets so that they don't get in the way
+       Note that we substitute the function too; we might 
+       have this as a LHS:  let f71 = M.f Int in f71
+
+   (c) Do eta reduction.  To see why, consider the fold/build rule, 
+       which without simplification looked like:
+          fold k z (build (/\a. g a))  ==>  ...
+       This doesn't match unless you do eta reduction on the build argument.
+       Similarly for a LHS like
+       	 augment g (build h) 
+       we do not want to get
+       	 augment (\a. g a) (build h)
+       otherwise we don't match when given an argument like
+          augment (\a. h a a) (build h)
 
 Note [Matching seqId]
 ~~~~~~~~~~~~~~~~~~~
@@ -666,8 +711,8 @@ the constraint is unused.  We could bind 'd' to (error "unused")
 but it seems better to reject the program because it's almost certainly
 a mistake.  That's what the isDeadBinder call detects.
 
-Note [Constant rule dicts]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Free dictionaries]
+~~~~~~~~~~~~~~~~~~~~~~~~
 When the LHS of a specialisation rule, (/\as\ds. f es) has a free dict, 
 which is presumably in scope at the function definition site, we can quantify 
 over it too.  *Any* dict with that type will do.
@@ -706,7 +751,8 @@ dsHsWrapper (WpTyApp ty)      e = return $ App e (Type ty)
 dsHsWrapper (WpLet ev_binds)  e = do bs <- dsTcEvBinds ev_binds
                                      return (mkCoreLets bs e)
 dsHsWrapper (WpCompose c1 c2) e = dsHsWrapper c1 =<< dsHsWrapper c2 e
-dsHsWrapper (WpCast co)       e = dsTcCoercion Representational co (mkCast e) 
+dsHsWrapper (WpCast co)       e = ASSERT(tcCoercionRole co == Representational)
+                                  dsTcCoercion co (mkCast e)
 dsHsWrapper (WpEvLam ev)      e = return $ Lam ev e 
 dsHsWrapper (WpTyLam tv)      e = return $ Lam tv e 
 dsHsWrapper (WpEvApp evtrm)   e = liftM (App e) (dsEvTerm evtrm)
@@ -740,7 +786,7 @@ dsEvTerm (EvId v) = return (Var v)
 
 dsEvTerm (EvCast tm co) 
   = do { tm' <- dsEvTerm tm
-       ; dsTcCoercion Representational co $ mkCast tm' }
+       ; dsTcCoercion co $ mkCast tm' }
                         -- 'v' is always a lifted evidence variable so it is
                         -- unnecessary to call varToCoreExpr v here.
 
@@ -748,7 +794,7 @@ dsEvTerm (EvDFunApp df tys tms) = do { tms' <- mapM dsEvTerm tms
                                      ; return (Var df `mkTyApps` tys `mkApps` tms') }
 
 dsEvTerm (EvCoercion (TcCoVarCo v)) = return (Var v)  -- See Note [Simple coercions]
-dsEvTerm (EvCoercion co)            = dsTcCoercion Nominal co mkEqBox
+dsEvTerm (EvCoercion co)            = dsTcCoercion co mkEqBox
 
 dsEvTerm (EvTupleSel v n)
    = do { tm' <- dsEvTerm v
@@ -786,7 +832,7 @@ dsEvTerm (EvLit l) =
     EvStr s -> mkStringExprFS s
 
 ---------------------------------------
-dsTcCoercion :: Role -> TcCoercion -> (Coercion -> CoreExpr) -> DsM CoreExpr
+dsTcCoercion :: TcCoercion -> (Coercion -> CoreExpr) -> DsM CoreExpr
 -- This is the crucial function that moves 
 -- from TcCoercions to Coercions; see Note [TcCoercions] in Coercion
 -- e.g.  dsTcCoercion (trans g1 g2) k
@@ -794,14 +840,14 @@ dsTcCoercion :: Role -> TcCoercion -> (Coercion -> CoreExpr) -> DsM CoreExpr
 --         case g2 of EqBox g2# ->
 --         k (trans g1# g2#)
 -- thing_inside will get a coercion at the role requested
-dsTcCoercion role co thing_inside
+dsTcCoercion co thing_inside
   = do { us <- newUniqueSupply
        ; let eqvs_covs :: [(EqVar,CoVar)]
              eqvs_covs = zipWith mk_co_var (varSetElems (coVarsOfTcCo co))
                                            (uniqsFromSupply us)
 
              subst = mkCvSubst emptyInScopeSet [(eqv, mkCoVarCo cov) | (eqv, cov) <- eqvs_covs]
-             result_expr = thing_inside (ds_tc_coercion subst role co)
+             result_expr = thing_inside (ds_tc_coercion subst co)
              result_ty   = exprType result_expr
 
        ; return (foldr (wrap_in_case result_ty) result_expr eqvs_covs) }
@@ -812,41 +858,43 @@ dsTcCoercion role co thing_inside
          eq_nm = idName eqv
          occ = nameOccName eq_nm
          loc = nameSrcSpan eq_nm
-         ty  = mkCoercionType Nominal ty1 ty2
+         ty  = mkCoercionType (getEqPredRole (evVarPred eqv)) ty1 ty2
          (ty1, ty2) = getEqPredTys (evVarPred eqv)
 
-    wrap_in_case result_ty (eqv, cov) body 
-      = Case (Var eqv) eqv result_ty [(DataAlt eqBoxDataCon, [cov], body)]
+    wrap_in_case result_ty (eqv, cov) body
+      = case getEqPredRole (evVarPred eqv) of
+         Nominal          -> Case (Var eqv) eqv result_ty [(DataAlt eqBoxDataCon, [cov], body)]
+         Representational -> Case (Var eqv) eqv result_ty [(DataAlt coercibleDataCon, [cov], body)]
+         Phantom          -> panic "wrap_in_case/phantom"
 
-ds_tc_coercion :: CvSubst -> Role -> TcCoercion -> Coercion
--- If the incoming TcCoercion if of type (a ~ b), 
---                 the result is of type (a ~# b)
--- The VarEnv maps EqVars of type (a ~ b) to Coercions of type (a ~# b)
+ds_tc_coercion :: CvSubst -> TcCoercion -> Coercion
+-- If the incoming TcCoercion if of type (a ~ b)   (resp.  Coercible a b)
+--                 the result is of type (a ~# b)  (reps.  a ~# b)
+-- The VarEnv maps EqVars of type (a ~ b) to Coercions of type (a ~# b) (resp. and so on)
 -- No need for InScope set etc because the 
-ds_tc_coercion subst role tc_co
-  = go role tc_co
+ds_tc_coercion subst tc_co
+  = go tc_co
   where
-    go Phantom co
-      = mkUnivCo Phantom ty1 ty2
-      where Pair ty1 ty2 = tcCoercionKind co
-
-    go r (TcRefl ty)            = Refl r (Coercion.substTy subst ty)
-    go r (TcTyConAppCo tc cos)  = mkTyConAppCo r tc (zipWith go (tyConRolesX r tc) cos)
-    go r (TcAppCo co1 co2)      = mkAppCo (go r co1) (go Nominal co2)
-    go r (TcForAllCo tv co)     = mkForAllCo tv' (ds_tc_coercion subst' r co)
+    go (TcRefl r ty)            = Refl r (Coercion.substTy subst ty)
+    go (TcTyConAppCo r tc cos)  = mkTyConAppCo r tc (map go cos)
+    go (TcAppCo co1 co2)        = let leftCo    = go co1
+                                      rightRole = nextRole leftCo in
+                                  mkAppCoFlexible leftCo rightRole (go co2)
+    go (TcForAllCo tv co)       = mkForAllCo tv' (ds_tc_coercion subst' co)
                               where
                                 (subst', tv') = Coercion.substTyVarBndr subst tv
-    go r (TcAxiomInstCo ax ind tys)
-                                = mkAxInstCo r ax ind (map (Coercion.substTy subst) tys)
-    go r (TcSymCo co)           = mkSymCo (go r co)
-    go r (TcTransCo co1 co2)    = mkTransCo (go r co1) (go r co2)
-    go r (TcNthCo n co)         = mkNthCoRole r n (go r co) -- the 2nd r is a harmless lie
-    go r (TcLRCo lr co)         = maybeSubCo r $ mkLRCo lr (go Nominal co)
-    go r (TcInstCo co ty)       = mkInstCo (go r co) ty
-    go r (TcLetCo bs co)        = ds_tc_coercion (ds_co_binds bs) r co
-    go r (TcCastCo co1 co2)     = maybeSubCo r $ mkCoCast (go Nominal co1)
-                                                          (go Nominal co2)
-    go r (TcCoVarCo v)          = maybeSubCo r $ ds_ev_id subst v
+    go (TcAxiomInstCo ax ind cos)
+                                = AxiomInstCo ax ind (map go cos)
+    go (TcPhantomCo ty1 ty2)    = UnivCo Phantom ty1 ty2
+    go (TcSymCo co)             = mkSymCo (go co)
+    go (TcTransCo co1 co2)      = mkTransCo (go co1) (go co2)
+    go (TcNthCo n co)           = mkNthCo n (go co)
+    go (TcLRCo lr co)           = mkLRCo lr (go co)
+    go (TcSubCo co)             = mkSubCo (go co)
+    go (TcLetCo bs co)          = ds_tc_coercion (ds_co_binds bs) co
+    go (TcCastCo co1 co2)       = mkCoCast (go co1) (go co2)
+    go (TcCoVarCo v)            = ds_ev_id subst v
+    go (TcAxiomRuleCo co ts cs) = AxiomRuleCo co (map (Coercion.substTy subst) ts) (map go cs)
 
     ds_co_binds :: TcEvBinds -> CvSubst
     ds_co_binds (EvBinds bs)      = foldl ds_scc subst (sccEvBinds bs)
@@ -858,9 +906,9 @@ ds_tc_coercion subst role tc_co
     ds_scc _ (CyclicSCC other) = pprPanic "ds_scc:cyclic" (ppr other $$ ppr tc_co)
 
     ds_co_term :: CvSubst -> EvTerm -> Coercion
-    ds_co_term subst (EvCoercion tc_co) = ds_tc_coercion subst Nominal tc_co
+    ds_co_term subst (EvCoercion tc_co) = ds_tc_coercion subst tc_co
     ds_co_term subst (EvId v)           = ds_ev_id subst v
-    ds_co_term subst (EvCast tm co)     = mkCoCast (ds_co_term subst tm) (ds_tc_coercion subst Nominal co)
+    ds_co_term subst (EvCast tm co)     = mkCoCast (ds_co_term subst tm) (ds_tc_coercion subst co)
     ds_co_term _ other = pprPanic "ds_co_term" (ppr other $$ ppr tc_co)
 
     ds_ev_id :: CvSubst -> EqVar -> Coercion

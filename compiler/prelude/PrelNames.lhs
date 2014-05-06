@@ -37,55 +37,70 @@ Nota Bene: all Names defined in here should come from the base package
 
 Note [Known-key names]
 ~~~~~~~~~~~~~~~~~~~~~~
+It is *very* important that the compiler gives wired-in things and
+things with "known-key" names the correct Uniques wherever they
+occur. We have to be careful about this in exactly two places:
 
-It is *very* important that the compiler gives wired-in things and things with "known-key" names
-the correct Uniques wherever they occur. We have to be careful about this in exactly two places:
+  1. When we parse some source code, renaming the AST better yield an
+     AST whose Names have the correct uniques
 
-  1. When we parse some source code, renaming the AST better yield an AST whose Names have the
-     correct uniques
-
-  2. When we read an interface file, the read-in gubbins better have the right uniques
+  2. When we read an interface file, the read-in gubbins better have
+     the right uniques
 
 This is accomplished through a combination of mechanisms:
 
-  1. When parsing source code, the RdrName-decorated AST has some RdrNames which are Exact. These are
-     wired-in RdrNames where the we could directly tell from the parsed syntax what Name to use. For
-     example, when we parse a [] in a type we can just insert an Exact RdrName Name with the listTyConKey.
+  1. When parsing source code, the RdrName-decorated AST has some
+     RdrNames which are Exact. These are wired-in RdrNames where the
+     we could directly tell from the parsed syntax what Name to
+     use. For example, when we parse a [] in a type we can just insert
+     an Exact RdrName Name with the listTyConKey.
 
-     Currently, I believe this is just an optimisation: it would be equally valid to just output Orig
-     RdrNames that correctly record the module etc we expect the final Name to come from. However,
-     were we to eliminate isTupleOcc_maybe it would become essential (see point 3).
+     Currently, I believe this is just an optimisation: it would be
+     equally valid to just output Orig RdrNames that correctly record
+     the module etc we expect the final Name to come from. However,
+     were we to eliminate isBuiltInOcc_maybe it would become essential
+     (see point 3).
 
-  2. The knownKeyNames (which consist of the basicKnownKeyNames from the module, and those names reachable
-     via the wired-in stuff from TysWiredIn) are used to initialise the "original name cache" in IfaceEnv.
-     This initialization ensures that when the type checker or renamer (both of which use IfaceEnv) look up
-     an original name (i.e. a pair of a Module and an OccName) for a known-key name they get the correct Unique.
+  2. The knownKeyNames (which consist of the basicKnownKeyNames from
+     the module, and those names reachable via the wired-in stuff from
+     TysWiredIn) are used to initialise the "OrigNameCache" in
+     IfaceEnv.  This initialization ensures that when the type checker
+     or renamer (both of which use IfaceEnv) look up an original name
+     (i.e. a pair of a Module and an OccName) for a known-key name
+     they get the correct Unique.
 
-     This is the most important mechanism for ensuring that known-key stuff gets the right Unique, and is why
-     it is so important to place your known-key names in the appropriate lists.
+     This is the most important mechanism for ensuring that known-key
+     stuff gets the right Unique, and is why it is so important to
+     place your known-key names in the appropriate lists.
 
-  3. For "infinite families" of known-key names (i.e. tuples, Any tycons and implicit parameter TyCons), we
-     have to be extra careful. Because there are an infinite number of these things, we cannot add them to
-     the list of known-key names used to initialise the original name cache. Instead, we have to rely on
-     never having to look them up in that cache.
+  3. For "infinite families" of known-key names (i.e. tuples), we have
+     to be extra careful. Because there are an infinite number of
+     these things, we cannot add them to the list of known-key names
+     used to initialise the OrigNameCache. Instead, we have to
+     rely on never having to look them up in that cache.
 
      This is accomplished through a variety of mechanisms:
 
-       a) The known infinite families of names are specially serialised by BinIface.putName, with that special treatment
-          detected when we read back to ensure that we get back to the correct uniques.
+       a) The parser recognises them specially and generates an 
+          Exact Name (hence not looked up in the orig-name cache)
 
-       b) Most of the infinite families cannot occur in source code, so mechanism a) sufficies to ensure that they
-          always have the right Unique. In particular, implicit param TyCon names, constraint tuples and Any TyCons
-          cannot be mentioned by the user.
+       b) The known infinite families of names are specially
+          serialised by BinIface.putName, with that special treatment
+          detected when we read back to ensure that we get back to the
+          correct uniques.
 
-       c) Tuple TyCon/DataCon names have a special hack (isTupleOcc_maybe) that is used by the original name cache
-          lookup routine to detect tuple names and give them the right Unique. You might think that this is unnecessary
-          because tuple TyCon/DataCons are parsed as Exact RdrNames and *don't* appear as original names in interface files
-          (because serialization gives them special treatment), so we will never look them up in the original name cache.
+       Most of the infinite families cannot occur in source code,
+       so mechanisms (a,b) sufficies to ensure that they always have
+       the right Unique. In particular, implicit param TyCon names,
+       constraint tuples and Any TyCons cannot be mentioned by the
+       user.
 
-          However, there is a subtle reason why this is not the case: if you use setRdrNameSpace on an Exact RdrName
-          it may be turned into an Orig RdrName. So if the original name was an Exact tuple Name we might end up with
-          an Orig instead, which *will* lead to an original name cache query.
+       c) IfaceEnv.lookupOrigNameCache uses isBuiltInOcc_maybe to map
+          built-in syntax directly onto the corresponding name, rather
+          than trying to find it in the original-name cache.
+
+          See also Note [Built-in syntax and the OrigNameCache]
+
 \begin{code}
 module PrelNames (
         Unique, Uniquable(..), hasKey,  -- Re-exported for convenience
@@ -184,6 +199,7 @@ basicKnownKeyNames
         dataClassName,
         isStringClassName,
         applicativeClassName,
+        alternativeClassName,
         foldableClassName,
         traversableClassName,
         typeableClassName,              -- derivable
@@ -203,10 +219,15 @@ basicKnownKeyNames
         enumFromName, enumFromThenName,
         enumFromThenToName, enumFromToName,
 
+        -- Applicative/Alternative stuff
+        pureAName,
+        apAName,
+
         -- Monad stuff
         thenIOName, bindIOName, returnIOName, failIOName,
         failMName, bindMName, thenMName, returnMName,
         fmapName,
+        joinMName,
 
         -- MonadRec stuff
         mfixName,
@@ -244,12 +265,10 @@ basicKnownKeyNames
         concatName, filterName, mapName,
         zipName, foldrName, buildName, augmentName, appendName,
 
-        dollarName,         -- The ($) apply function
-
         -- FFI primitive types that are not wired-in.
         stablePtrTyConName, ptrTyConName, funPtrTyConName,
         int8TyConName, int16TyConName, int32TyConName, int64TyConName,
-        wordTyConName, word8TyConName, word16TyConName, word32TyConName, word64TyConName,
+        word8TyConName, word16TyConName, word32TyConName, word64TyConName,
 
         -- Others
         otherwiseIdName, inlineIdName,
@@ -288,11 +307,7 @@ basicKnownKeyNames
         randomClassName, randomGenClassName, monadPlusClassName,
 
         -- Type-level naturals
-        singIClassName,
-        typeNatLeqClassName,
-        typeNatAddTyFamName,
-        typeNatMulTyFamName,
-        typeNatExpTyFamName,
+        knownNatClassName, knownSymbolClassName,
 
         -- Implicit parameters
         ipClassName,
@@ -302,6 +317,9 @@ basicKnownKeyNames
 
         -- The Ordering type
         , orderingTyConName, ltDataConName, eqDataConName, gtDataConName
+
+        -- The SPEC type for SpecConstr
+        , specTyConName
 
         -- The Either type
         , eitherTyConName, leftDataConName, rightDataConName
@@ -350,7 +368,7 @@ genericTyConNames = [
 pRELUDE :: Module
 pRELUDE         = mkBaseModule_ pRELUDE_NAME
 
-gHC_PRIM, gHC_PRIMWRAPPERS, gHC_TYPES, gHC_GENERICS, gHC_MAGIC,
+gHC_PRIM, gHC_TYPES, gHC_GENERICS, gHC_MAGIC,
     gHC_CLASSES, gHC_BASE, gHC_ENUM, gHC_GHCI, gHC_CSTRING,
     gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER_TYPE, gHC_LIST,
     gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING, dATA_FOLDABLE, dATA_TRAVERSABLE, dATA_MONOID,
@@ -363,7 +381,6 @@ gHC_PRIM, gHC_PRIMWRAPPERS, gHC_TYPES, gHC_GENERICS, gHC_MAGIC,
     cONTROL_EXCEPTION_BASE, gHC_TYPELITS, gHC_IP :: Module
 
 gHC_PRIM        = mkPrimModule (fsLit "GHC.Prim")   -- Primitive types and values
-gHC_PRIMWRAPPERS = mkPrimModule (fsLit "GHC.PrimWrappers")
 gHC_TYPES       = mkPrimModule (fsLit "GHC.Types")
 gHC_MAGIC       = mkPrimModule (fsLit "GHC.Magic")
 gHC_CSTRING     = mkPrimModule (fsLit "GHC.CString")
@@ -427,12 +444,9 @@ mAIN, rOOT_MAIN :: Module
 mAIN            = mkMainModule_ mAIN_NAME
 rOOT_MAIN       = mkMainModule (fsLit ":Main") -- Root module for initialisation
 
-        -- The ':xxx' makes a module name that the user can never
-        -- use himself.  The z-encoding for ':' is "ZC", so the z-encoded
-        -- module name still starts with a capital letter, which keeps
-        -- the z-encoded version consistent.
-iNTERACTIVE :: Module
-iNTERACTIVE    = mkMainModule (fsLit ":Interactive")
+mkInteractiveModule :: Int -> Module
+-- (mkInteractiveMoudule 9) makes module 'interactive:M9'
+mkInteractiveModule n = mkModule interactivePackageId (mkModuleName ("Ghci" ++ show n))
 
 pRELUDE_NAME, mAIN_NAME :: ModuleName
 pRELUDE_NAME   = mkModuleNameFS (fsLit "Prelude")
@@ -474,10 +488,10 @@ mkMainModule_ m = mkModule mainPackageId m
 %************************************************************************
 
 \begin{code}
-mkTupleModule :: TupleSort -> Arity -> Module
-mkTupleModule BoxedTuple   _ = gHC_TUPLE
-mkTupleModule ConstraintTuple    _ = gHC_TUPLE
-mkTupleModule UnboxedTuple _ = gHC_PRIM
+mkTupleModule :: TupleSort -> Module
+mkTupleModule BoxedTuple      = gHC_TUPLE
+mkTupleModule ConstraintTuple = gHC_TUPLE
+mkTupleModule UnboxedTuple    = gHC_PRIM
 \end{code}
 
 
@@ -634,7 +648,7 @@ showParen_RDR           = varQual_RDR gHC_SHOW (fsLit "showParen")
 
 typeRep_RDR, mkTyCon_RDR, mkTyConApp_RDR,
     oldTypeOf_RDR, oldMkTyCon_RDR, oldMkTyConApp_RDR :: RdrName
-typeRep_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "typeRep")
+typeRep_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "typeRep#")
 mkTyCon_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "mkTyCon")
 mkTyConApp_RDR    = varQual_RDR tYPEABLE_INTERNAL    (fsLit "mkTyConApp")
 oldTypeOf_RDR     = varQual_RDR oLDTYPEABLE_INTERNAL (fsLit "typeOf")
@@ -701,8 +715,8 @@ notAssocDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit "NotAssociative")
 fmap_RDR, pure_RDR, ap_RDR, foldable_foldr_RDR, foldMap_RDR,
     traverse_RDR, mempty_RDR, mappend_RDR :: RdrName
 fmap_RDR                = varQual_RDR gHC_BASE (fsLit "fmap")
-pure_RDR                = varQual_RDR cONTROL_APPLICATIVE (fsLit "pure")
-ap_RDR                  = varQual_RDR cONTROL_APPLICATIVE (fsLit "<*>")
+pure_RDR                = nameRdrName pureAName
+ap_RDR                  = nameRdrName apAName
 foldable_foldr_RDR      = varQual_RDR dATA_FOLDABLE       (fsLit "foldr")
 foldMap_RDR             = varQual_RDR dATA_FOLDABLE       (fsLit "foldMap")
 traverse_RDR            = varQual_RDR dATA_TRAVERSABLE    (fsLit "traverse")
@@ -741,9 +755,12 @@ runMainIOName = varQual gHC_TOP_HANDLER (fsLit "runMainIO") runMainKey
 
 orderingTyConName, ltDataConName, eqDataConName, gtDataConName :: Name
 orderingTyConName = tcQual   gHC_TYPES (fsLit "Ordering") orderingTyConKey
-ltDataConName = conName gHC_TYPES (fsLit "LT") ltDataConKey
-eqDataConName = conName gHC_TYPES (fsLit "EQ") eqDataConKey
-gtDataConName = conName gHC_TYPES (fsLit "GT") gtDataConKey
+ltDataConName     = conName gHC_TYPES (fsLit "LT") ltDataConKey
+eqDataConName     = conName gHC_TYPES (fsLit "EQ") eqDataConKey
+gtDataConName     = conName gHC_TYPES (fsLit "GT") gtDataConKey
+
+specTyConName :: Name
+specTyConName     = tcQual gHC_TYPES (fsLit "SPEC") specTyConKey
 
 eitherTyConName, leftDataConName, rightDataConName :: Name
 eitherTyConName   = tcQual  dATA_EITHER (fsLit "Either") eitherTyConKey
@@ -821,6 +838,23 @@ applicativeClassName  = clsQual  cONTROL_APPLICATIVE (fsLit "Applicative") appli
 foldableClassName     = clsQual  dATA_FOLDABLE       (fsLit "Foldable")    foldableClassKey
 traversableClassName  = clsQual  dATA_TRAVERSABLE    (fsLit "Traversable") traversableClassKey
 
+
+
+-- AMP additions
+
+joinMName,  apAName, pureAName, alternativeClassName :: Name
+joinMName            = methName mONAD               (fsLit "join")        joinMIdKey
+apAName              = methName cONTROL_APPLICATIVE (fsLit "<*>")         apAClassOpKey
+pureAName            = methName cONTROL_APPLICATIVE (fsLit "pure")        pureAClassOpKey
+alternativeClassName = clsQual  cONTROL_APPLICATIVE (fsLit "Alternative") alternativeClassKey
+
+joinMIdKey, apAClassOpKey, pureAClassOpKey, alternativeClassKey :: Unique
+joinMIdKey          = mkPreludeMiscIdUnique 750
+apAClassOpKey       = mkPreludeMiscIdUnique 751 -- <*>
+pureAClassOpKey     = mkPreludeMiscIdUnique 752
+alternativeClassKey = mkPreludeMiscIdUnique 753
+
+
 -- Functions for GHC extensions
 groupWithName :: Name
 groupWithName = varQual gHC_EXTS (fsLit "groupWith") groupWithIdKey
@@ -829,7 +863,7 @@ groupWithName = varQual gHC_EXTS (fsLit "groupWith") groupWithIdKey
 fromStringName, otherwiseIdName, foldrName, buildName, augmentName,
     mapName, appendName, assertName,
     breakpointName, breakpointCondName, breakpointAutoName,
-    dollarName, opaqueTyConName :: Name
+    opaqueTyConName :: Name
 fromStringName = methName dATA_STRING (fsLit "fromString") fromStringClassOpKey
 otherwiseIdName   = varQual gHC_BASE (fsLit "otherwise")  otherwiseIdKey
 foldrName         = varQual gHC_BASE (fsLit "foldr")      foldrIdKey
@@ -837,7 +871,6 @@ buildName         = varQual gHC_BASE (fsLit "build")      buildIdKey
 augmentName       = varQual gHC_BASE (fsLit "augment")    augmentIdKey
 mapName           = varQual gHC_BASE (fsLit "map")        mapIdKey
 appendName        = varQual gHC_BASE (fsLit "++")         appendIdKey
-dollarName        = varQual gHC_BASE (fsLit "$")          dollarIdKey
 assertName        = varQual gHC_BASE (fsLit "assert")     assertIdKey
 breakpointName    = varQual gHC_BASE (fsLit "breakpoint") breakpointIdKey
 breakpointCondName= varQual gHC_BASE (fsLit "breakpointCond") breakpointCondIdKey
@@ -1063,14 +1096,11 @@ int32TyConName    = tcQual gHC_INT  (fsLit "Int32") int32TyConKey
 int64TyConName    = tcQual gHC_INT  (fsLit "Int64") int64TyConKey
 
 -- Word module
-word8TyConName, word16TyConName, word32TyConName, word64TyConName,
-    wordTyConName, wordDataConName :: Name
+word8TyConName, word16TyConName, word32TyConName, word64TyConName :: Name
 word8TyConName    = tcQual  gHC_WORD (fsLit "Word8")  word8TyConKey
 word16TyConName   = tcQual  gHC_WORD (fsLit "Word16") word16TyConKey
 word32TyConName   = tcQual  gHC_WORD (fsLit "Word32") word32TyConKey
 word64TyConName   = tcQual  gHC_WORD (fsLit "Word64") word64TyConKey
-wordTyConName     = tcQual  gHC_TYPES (fsLit "Word")   wordTyConKey
-wordDataConName   = conName gHC_TYPES (fsLit "W#") wordDataConKey
 
 -- PrelPtr module
 ptrTyConName, funPtrTyConName :: Name
@@ -1120,13 +1150,10 @@ randomGenClassName  = clsQual rANDOM (fsLit "RandomGen") randomGenClassKey
 isStringClassName   = clsQual dATA_STRING (fsLit "IsString") isStringClassKey
 
 -- Type-level naturals
-singIClassName, typeNatLeqClassName,
-  typeNatAddTyFamName, typeNatMulTyFamName, typeNatExpTyFamName :: Name
-singIClassName      = clsQual gHC_TYPELITS (fsLit "SingI") singIClassNameKey
-typeNatLeqClassName = clsQual gHC_TYPELITS (fsLit "<=")  typeNatLeqClassNameKey
-typeNatAddTyFamName = tcQual  gHC_TYPELITS (fsLit "+")   typeNatAddTyFamNameKey
-typeNatMulTyFamName = tcQual  gHC_TYPELITS (fsLit "*")   typeNatMulTyFamNameKey
-typeNatExpTyFamName = tcQual  gHC_TYPELITS (fsLit "^")   typeNatExpTyFamNameKey
+knownNatClassName :: Name
+knownNatClassName     = clsQual gHC_TYPELITS (fsLit "KnownNat") knownNatClassNameKey
+knownSymbolClassName :: Name
+knownSymbolClassName  = clsQual gHC_TYPELITS (fsLit "KnownSymbol") knownSymbolClassNameKey
 
 -- Implicit parameters
 ipClassName :: Name
@@ -1248,10 +1275,13 @@ datatypeClassKey    = mkPreludeClassUnique 39
 constructorClassKey = mkPreludeClassUnique 40
 selectorClassKey    = mkPreludeClassUnique 41
 
--- SingI: see Note [SingI and EvLit] in TcEvidence
-singIClassNameKey, typeNatLeqClassNameKey :: Unique
-singIClassNameKey       = mkPreludeClassUnique 42
-typeNatLeqClassNameKey  = mkPreludeClassUnique 43
+-- KnownNat: see Note [KnowNat & KnownSymbol and EvLit] in TcEvidence
+knownNatClassNameKey :: Unique
+knownNatClassNameKey = mkPreludeClassUnique 42
+
+-- KnownSymbol: see Note [KnownNat & KnownSymbol and EvLit] in TcEvidence
+knownSymbolClassNameKey :: Unique
+knownSymbolClassNameKey = mkPreludeClassUnique 43
 
 ghciIoClassKey :: Unique
 ghciIoClassKey = mkPreludeClassUnique 44
@@ -1289,7 +1319,8 @@ addrPrimTyConKey, arrayPrimTyConKey, arrayArrayPrimTyConKey, boolTyConKey, byteA
     mutableArrayPrimTyConKey, mutableArrayArrayPrimTyConKey, mutableByteArrayPrimTyConKey,
     orderingTyConKey, mVarPrimTyConKey, ratioTyConKey, rationalTyConKey,
     realWorldTyConKey, stablePtrPrimTyConKey, stablePtrTyConKey,
-    anyTyConKey, eqTyConKey :: Unique
+    anyTyConKey, eqTyConKey, smallArrayPrimTyConKey,
+    smallMutableArrayPrimTyConKey :: Unique
 addrPrimTyConKey                        = mkPreludeTyConUnique  1
 arrayPrimTyConKey                       = mkPreludeTyConUnique  3
 boolTyConKey                            = mkPreludeTyConUnique  4
@@ -1335,7 +1366,7 @@ statePrimTyConKey, stableNamePrimTyConKey, stableNameTyConKey,
     liftedConKey, unliftedConKey, anyBoxConKey, kindConKey, boxityConKey,
     typeConKey, threadIdPrimTyConKey, bcoPrimTyConKey, ptrTyConKey,
     funPtrTyConKey, tVarPrimTyConKey, eqPrimTyConKey,
-    eqReprPrimTyConKey :: Unique
+    eqReprPrimTyConKey, voidPrimTyConKey :: Unique
 statePrimTyConKey                       = mkPreludeTyConUnique 50
 stableNamePrimTyConKey                  = mkPreludeTyConUnique 51
 stableNameTyConKey                      = mkPreludeTyConUnique 52
@@ -1343,6 +1374,7 @@ eqPrimTyConKey                          = mkPreludeTyConUnique 53
 eqReprPrimTyConKey                      = mkPreludeTyConUnique 54
 mutVarPrimTyConKey                      = mkPreludeTyConUnique 55
 ioTyConKey                              = mkPreludeTyConUnique 56
+voidPrimTyConKey                        = mkPreludeTyConUnique 57
 wordPrimTyConKey                        = mkPreludeTyConUnique 58
 wordTyConKey                            = mkPreludeTyConUnique 59
 word8TyConKey                           = mkPreludeTyConUnique 60
@@ -1453,26 +1485,43 @@ rep1TyConKey = mkPreludeTyConUnique 156
 
 -- Type-level naturals
 typeNatKindConNameKey, typeSymbolKindConNameKey,
-  typeNatAddTyFamNameKey, typeNatMulTyFamNameKey, typeNatExpTyFamNameKey
+  typeNatAddTyFamNameKey, typeNatMulTyFamNameKey, typeNatExpTyFamNameKey,
+  typeNatLeqTyFamNameKey, typeNatSubTyFamNameKey
+  , typeSymbolCmpTyFamNameKey, typeNatCmpTyFamNameKey
   :: Unique
 typeNatKindConNameKey     = mkPreludeTyConUnique 160
 typeSymbolKindConNameKey  = mkPreludeTyConUnique 161
 typeNatAddTyFamNameKey    = mkPreludeTyConUnique 162
 typeNatMulTyFamNameKey    = mkPreludeTyConUnique 163
 typeNatExpTyFamNameKey    = mkPreludeTyConUnique 164
+typeNatLeqTyFamNameKey    = mkPreludeTyConUnique 165
+typeNatSubTyFamNameKey    = mkPreludeTyConUnique 166
+typeSymbolCmpTyFamNameKey = mkPreludeTyConUnique 167
+typeNatCmpTyFamNameKey    = mkPreludeTyConUnique 168
 
--- SIMD vector types (Unique keys)
-floatX4PrimTyConKey, doubleX2PrimTyConKey, int32X4PrimTyConKey,
-  int64X2PrimTyConKey :: Unique
+ntTyConKey:: Unique
+ntTyConKey = mkPreludeTyConUnique 174
+coercibleTyConKey :: Unique
+coercibleTyConKey = mkPreludeTyConUnique 175
 
-floatX4PrimTyConKey  = mkPreludeTyConUnique 170
-doubleX2PrimTyConKey = mkPreludeTyConUnique 171
-int32X4PrimTyConKey  = mkPreludeTyConUnique 172
-int64X2PrimTyConKey  = mkPreludeTyConUnique 173
+proxyPrimTyConKey :: Unique
+proxyPrimTyConKey = mkPreludeTyConUnique 176
+
+specTyConKey :: Unique
+specTyConKey = mkPreludeTyConUnique 177
+
+smallArrayPrimTyConKey        = mkPreludeTyConUnique  178
+smallMutableArrayPrimTyConKey = mkPreludeTyConUnique  179
 
 ---------------- Template Haskell -------------------
 --      USES TyConUniques 200-299
 -----------------------------------------------------
+
+----------------------- SIMD ------------------------
+--      USES TyConUniques 300-399
+-----------------------------------------------------
+
+#include "primop-vector-uniques.hs-incl"
 
 unitTyConKey :: Unique
 unitTyConKey = mkTupleTyConUnique BoxedTuple 0
@@ -1488,7 +1537,7 @@ unitTyConKey = mkTupleTyConUnique BoxedTuple 0
 charDataConKey, consDataConKey, doubleDataConKey, falseDataConKey,
     floatDataConKey, intDataConKey, nilDataConKey, ratioDataConKey,
     stableNameDataConKey, trueDataConKey, wordDataConKey,
-    ioDataConKey, integerDataConKey, eqBoxDataConKey :: Unique
+    ioDataConKey, integerDataConKey, eqBoxDataConKey, coercibleDataConKey :: Unique
 charDataConKey                          = mkPreludeDataConUnique  1
 consDataConKey                          = mkPreludeDataConUnique  2
 doubleDataConKey                        = mkPreludeDataConUnique  3
@@ -1528,6 +1577,8 @@ gtDataConKey                            = mkPreludeDataConUnique 29
 integerGmpSDataConKey, integerGmpJDataConKey :: Unique
 integerGmpSDataConKey                   = mkPreludeDataConUnique 30
 integerGmpJDataConKey                   = mkPreludeDataConUnique 31
+
+coercibleDataConKey                     = mkPreludeDataConUnique 32
 \end{code}
 
 %************************************************************************
@@ -1541,11 +1592,11 @@ wildCardKey, absentErrorIdKey, augmentIdKey, appendIdKey,
     buildIdKey, errorIdKey, foldrIdKey, recSelErrorIdKey,
     seqIdKey, irrefutPatErrorIdKey, eqStringIdKey,
     noMethodBindingErrorIdKey, nonExhaustiveGuardsErrorIdKey,
-    runtimeErrorIdKey, patErrorIdKey,
+    runtimeErrorIdKey, patErrorIdKey, voidPrimIdKey,
     realWorldPrimIdKey, recConErrorIdKey,
     unpackCStringUtf8IdKey, unpackCStringAppendIdKey,
     unpackCStringFoldrIdKey, unpackCStringIdKey :: Unique
-wildCardKey                   = mkPreludeMiscIdUnique  0  -- See Note [WildCard]
+wildCardKey                   = mkPreludeMiscIdUnique  0  -- See Note [WildCard binders]
 absentErrorIdKey              = mkPreludeMiscIdUnique  1
 augmentIdKey                  = mkPreludeMiscIdUnique  2
 appendIdKey                   = mkPreludeMiscIdUnique  3
@@ -1566,6 +1617,7 @@ unpackCStringUtf8IdKey        = mkPreludeMiscIdUnique 17
 unpackCStringAppendIdKey      = mkPreludeMiscIdUnique 18
 unpackCStringFoldrIdKey       = mkPreludeMiscIdUnique 19
 unpackCStringIdKey            = mkPreludeMiscIdUnique 20
+voidPrimIdKey                 = mkPreludeMiscIdUnique 21
 
 unsafeCoerceIdKey, concatIdKey, filterIdKey, zipIdKey, bindIOIdKey,
     returnIOIdKey, newStablePtrIdKey,
@@ -1692,8 +1744,11 @@ checkDotnetResNameIdKey       = mkPreludeMiscIdUnique 154
 undefinedKey :: Unique
 undefinedKey                  = mkPreludeMiscIdUnique 155
 
-magicSingIKey :: Unique
-magicSingIKey              = mkPreludeMiscIdUnique 156
+magicDictKey :: Unique
+magicDictKey                  = mkPreludeMiscIdUnique 156
+
+coerceKey :: Unique
+coerceKey                     = mkPreludeMiscIdUnique 157
 \end{code}
 
 Certain class operations from Prelude classes.  They get their own
@@ -1772,6 +1827,9 @@ fromListClassOpKey = mkPreludeMiscIdUnique 199
 fromListNClassOpKey = mkPreludeMiscIdUnique 500
 toListClassOpKey = mkPreludeMiscIdUnique 501
 
+proxyHashKey :: Unique
+proxyHashKey = mkPreludeMiscIdUnique 502
+
 ---------------- Template Haskell -------------------
 --      USES IdUniques 200-499
 -----------------------------------------------------
@@ -1812,7 +1870,8 @@ standardClassKeys = derivableClassKeys ++ numericClassKeys
                       functorClassKey,
                       monadClassKey, monadPlusClassKey,
                       isStringClassKey,
-                      applicativeClassKey, foldableClassKey, traversableClassKey
+                      applicativeClassKey, foldableClassKey,
+                      traversableClassKey, alternativeClassKey
                      ]
 \end{code}
 

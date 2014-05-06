@@ -10,7 +10,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | This module defines TyCons that can't be expressed in Haskell. 
@@ -45,15 +45,20 @@ module TysPrim(
 	floatPrimTyCon,		floatPrimTy,
 	doublePrimTyCon,	doublePrimTy,
 
+	voidPrimTyCon,		voidPrimTy,
 	statePrimTyCon,		mkStatePrimTy,
 	realWorldTyCon,		realWorldTy, realWorldStatePrimTy,
+
+	proxyPrimTyCon,		mkProxyPrimTy,
 
 	arrayPrimTyCon,	mkArrayPrimTy, 
 	byteArrayPrimTyCon,	byteArrayPrimTy,
 	arrayArrayPrimTyCon, mkArrayArrayPrimTy, 
+	smallArrayPrimTyCon, mkSmallArrayPrimTy,
 	mutableArrayPrimTyCon, mkMutableArrayPrimTy,
 	mutableByteArrayPrimTyCon, mkMutableByteArrayPrimTy,
 	mutableArrayArrayPrimTyCon, mkMutableArrayArrayPrimTy,
+	smallMutableArrayPrimTyCon, mkSmallMutableArrayPrimTy,
 	mutVarPrimTyCon, mkMutVarPrimTy,
 
 	mVarPrimTyCon,			mkMVarPrimTy,	
@@ -76,11 +81,8 @@ module TysPrim(
 	-- * Any
 	anyTy, anyTyCon, anyTypeOfKind,
 
-        -- * SIMD
-	floatX4PrimTyCon,		floatX4PrimTy,
-	doubleX2PrimTyCon,		doubleX2PrimTy,
-	int32X4PrimTyCon,		int32X4PrimTy,
-	int64X2PrimTyCon,		int64X2PrimTy
+	-- * SIMD
+#include "primop-vector-tys-exports.hs-incl"
   ) where
 
 #include "HsVersions.h"
@@ -111,6 +113,7 @@ primTyCons
     , arrayPrimTyCon
     , byteArrayPrimTyCon
     , arrayArrayPrimTyCon
+    , smallArrayPrimTyCon
     , charPrimTyCon
     , doublePrimTyCon
     , floatPrimTyCon
@@ -122,6 +125,7 @@ primTyCons
     , mutableArrayPrimTyCon
     , mutableByteArrayPrimTyCon
     , mutableArrayArrayPrimTyCon
+    , smallMutableArrayPrimTyCon
     , mVarPrimTyCon
     , tVarPrimTyCon
     , mutVarPrimTyCon
@@ -129,6 +133,8 @@ primTyCons
     , stablePtrPrimTyCon
     , stableNamePrimTyCon
     , statePrimTyCon
+    , voidPrimTyCon
+    , proxyPrimTyCon
     , threadIdPrimTyCon
     , wordPrimTyCon
     , word32PrimTyCon
@@ -144,10 +150,7 @@ primTyCons
     , superKindTyCon
     , anyKindTyCon
 
-    , floatX4PrimTyCon
-    , doubleX2PrimTyCon
-    , int32X4PrimTyCon
-    , int64X2PrimTyCon
+#include "primop-vector-tycons.hs-incl"
     ]
 
 mkPrimTc :: FastString -> Unique -> TyCon -> Name
@@ -157,7 +160,7 @@ mkPrimTc fs unique tycon
 		  (ATyCon tycon)	-- Relevant TyCon
 		  UserSyntax		-- None are built-in syntax
 
-charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, realWorldTyConName, arrayPrimTyConName, arrayArrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutableArrayArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPrimTyConName, eqReprPrimTyConName, floatX4PrimTyConName, doubleX2PrimTyConName, int32X4PrimTyConName, int64X2PrimTyConName :: Name
+charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, proxyPrimTyConName, realWorldTyConName, arrayPrimTyConName, arrayArrayPrimTyConName, smallArrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutableArrayArrayPrimTyConName, smallMutableArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPrimTyConName, eqReprPrimTyConName, voidPrimTyConName :: Name
 charPrimTyConName    	      = mkPrimTc (fsLit "Char#") charPrimTyConKey charPrimTyCon
 intPrimTyConName     	      = mkPrimTc (fsLit "Int#") intPrimTyConKey  intPrimTyCon
 int32PrimTyConName	      = mkPrimTc (fsLit "Int32#") int32PrimTyConKey int32PrimTyCon
@@ -169,15 +172,19 @@ addrPrimTyConName    	      = mkPrimTc (fsLit "Addr#") addrPrimTyConKey addrPrim
 floatPrimTyConName   	      = mkPrimTc (fsLit "Float#") floatPrimTyConKey floatPrimTyCon
 doublePrimTyConName  	      = mkPrimTc (fsLit "Double#") doublePrimTyConKey doublePrimTyCon
 statePrimTyConName            = mkPrimTc (fsLit "State#") statePrimTyConKey statePrimTyCon
+voidPrimTyConName             = mkPrimTc (fsLit "Void#") voidPrimTyConKey voidPrimTyCon
+proxyPrimTyConName            = mkPrimTc (fsLit "Proxy#") proxyPrimTyConKey proxyPrimTyCon
 eqPrimTyConName               = mkPrimTc (fsLit "~#") eqPrimTyConKey eqPrimTyCon
 eqReprPrimTyConName           = mkPrimTc (fsLit "~R#") eqReprPrimTyConKey eqReprPrimTyCon
 realWorldTyConName            = mkPrimTc (fsLit "RealWorld") realWorldTyConKey realWorldTyCon
 arrayPrimTyConName   	      = mkPrimTc (fsLit "Array#") arrayPrimTyConKey arrayPrimTyCon
 byteArrayPrimTyConName	      = mkPrimTc (fsLit "ByteArray#") byteArrayPrimTyConKey byteArrayPrimTyCon
 arrayArrayPrimTyConName   	  = mkPrimTc (fsLit "ArrayArray#") arrayArrayPrimTyConKey arrayArrayPrimTyCon
+smallArrayPrimTyConName       = mkPrimTc (fsLit "SmallArray#") smallArrayPrimTyConKey smallArrayPrimTyCon
 mutableArrayPrimTyConName     = mkPrimTc (fsLit "MutableArray#") mutableArrayPrimTyConKey mutableArrayPrimTyCon
 mutableByteArrayPrimTyConName = mkPrimTc (fsLit "MutableByteArray#") mutableByteArrayPrimTyConKey mutableByteArrayPrimTyCon
 mutableArrayArrayPrimTyConName= mkPrimTc (fsLit "MutableArrayArray#") mutableArrayArrayPrimTyConKey mutableArrayArrayPrimTyCon
+smallMutableArrayPrimTyConName= mkPrimTc (fsLit "SmallMutableArray#") smallMutableArrayPrimTyConKey smallMutableArrayPrimTyCon
 mutVarPrimTyConName	      = mkPrimTc (fsLit "MutVar#") mutVarPrimTyConKey mutVarPrimTyCon
 mVarPrimTyConName	      = mkPrimTc (fsLit "MVar#") mVarPrimTyConKey mVarPrimTyCon
 tVarPrimTyConName	      = mkPrimTc (fsLit "TVar#") tVarPrimTyConKey tVarPrimTyCon
@@ -186,10 +193,6 @@ stableNamePrimTyConName       = mkPrimTc (fsLit "StableName#") stableNamePrimTyC
 bcoPrimTyConName 	      = mkPrimTc (fsLit "BCO#") bcoPrimTyConKey bcoPrimTyCon
 weakPrimTyConName  	      = mkPrimTc (fsLit "Weak#") weakPrimTyConKey weakPrimTyCon
 threadIdPrimTyConName  	      = mkPrimTc (fsLit "ThreadId#") threadIdPrimTyConKey threadIdPrimTyCon
-floatX4PrimTyConName          = mkPrimTc (fsLit "FloatX4#") floatX4PrimTyConKey floatX4PrimTyCon
-doubleX2PrimTyConName         = mkPrimTc (fsLit "DoubleX2#") doubleX2PrimTyConKey doubleX2PrimTyCon
-int32X4PrimTyConName          = mkPrimTc (fsLit "Int32X4#") int32X4PrimTyConKey int32X4PrimTyCon
-int64X2PrimTyConName          = mkPrimTc (fsLit "Int64X2#") int64X2PrimTyConKey int64X2PrimTyCon
 \end{code}
 
 %************************************************************************
@@ -483,6 +486,21 @@ mkStatePrimTy ty = TyConApp statePrimTyCon [ty]
 statePrimTyCon :: TyCon   -- See Note [The State# TyCon]
 statePrimTyCon	 = pcPrimTyCon statePrimTyConName [Nominal] VoidRep
 
+voidPrimTy :: Type
+voidPrimTy = TyConApp voidPrimTyCon []
+
+voidPrimTyCon :: TyCon
+voidPrimTyCon	 = pcPrimTyCon voidPrimTyConName [] VoidRep
+
+mkProxyPrimTy :: Type -> Type -> Type
+mkProxyPrimTy k ty = TyConApp proxyPrimTyCon [k, ty]
+
+proxyPrimTyCon :: TyCon
+proxyPrimTyCon = mkPrimTyCon proxyPrimTyConName kind [Nominal,Nominal] VoidRep
+  where kind = ForAllTy kv $ mkArrowKind k unliftedTypeKind
+        kv   = kKiVar
+        k    = mkTyVarTy kv
+
 eqPrimTyCon :: TyCon  -- The representation type for equality predicates
 		      -- See Note [The ~# TyCon]
 eqPrimTyCon  = mkPrimTyCon eqPrimTyConName kind [Nominal, Nominal, Nominal] VoidRep
@@ -526,13 +544,16 @@ defined in \tr{TysWiredIn.lhs}, not here.
 
 \begin{code}
 arrayPrimTyCon, mutableArrayPrimTyCon, mutableByteArrayPrimTyCon,
-    byteArrayPrimTyCon, arrayArrayPrimTyCon, mutableArrayArrayPrimTyCon :: TyCon
+    byteArrayPrimTyCon, arrayArrayPrimTyCon, mutableArrayArrayPrimTyCon,
+    smallArrayPrimTyCon, smallMutableArrayPrimTyCon :: TyCon
 arrayPrimTyCon             = pcPrimTyCon arrayPrimTyConName             [Representational] PtrRep
 mutableArrayPrimTyCon      = pcPrimTyCon  mutableArrayPrimTyConName     [Nominal, Representational] PtrRep
 mutableByteArrayPrimTyCon  = pcPrimTyCon mutableByteArrayPrimTyConName  [Nominal] PtrRep
 byteArrayPrimTyCon         = pcPrimTyCon0 byteArrayPrimTyConName        PtrRep
 arrayArrayPrimTyCon        = pcPrimTyCon0 arrayArrayPrimTyConName       PtrRep
 mutableArrayArrayPrimTyCon = pcPrimTyCon mutableArrayArrayPrimTyConName [Nominal] PtrRep
+smallArrayPrimTyCon        = pcPrimTyCon smallArrayPrimTyConName        [Representational] PtrRep
+smallMutableArrayPrimTyCon = pcPrimTyCon smallMutableArrayPrimTyConName [Nominal, Representational] PtrRep
 
 mkArrayPrimTy :: Type -> Type
 mkArrayPrimTy elt    	    = TyConApp arrayPrimTyCon [elt]
@@ -540,12 +561,16 @@ byteArrayPrimTy :: Type
 byteArrayPrimTy	    	    = mkTyConTy byteArrayPrimTyCon
 mkArrayArrayPrimTy :: Type
 mkArrayArrayPrimTy = mkTyConTy arrayArrayPrimTyCon
+mkSmallArrayPrimTy :: Type -> Type
+mkSmallArrayPrimTy elt = TyConApp smallArrayPrimTyCon [elt]
 mkMutableArrayPrimTy :: Type -> Type -> Type
 mkMutableArrayPrimTy s elt  = TyConApp mutableArrayPrimTyCon [s, elt]
 mkMutableByteArrayPrimTy :: Type -> Type
 mkMutableByteArrayPrimTy s  = TyConApp mutableByteArrayPrimTyCon [s]
 mkMutableArrayArrayPrimTy :: Type -> Type
 mkMutableArrayArrayPrimTy s = TyConApp mutableArrayArrayPrimTyCon [s]
+mkSmallMutableArrayPrimTy :: Type -> Type -> Type
+mkSmallMutableArrayPrimTy s elt = TyConApp smallMutableArrayPrimTyCon [s, elt]
 \end{code}
 
 %************************************************************************
@@ -766,28 +791,10 @@ anyTypeOfKind kind = TyConApp anyTyCon [kind]
 
 %************************************************************************
 %*									*
-\subsection{SIMD vector type}
+\subsection{SIMD vector types}
 %*									*
 %************************************************************************
 
 \begin{code}
-floatX4PrimTy :: Type
-floatX4PrimTy = mkTyConTy floatX4PrimTyCon
-floatX4PrimTyCon :: TyCon
-floatX4PrimTyCon = pcPrimTyCon0 floatX4PrimTyConName (VecRep 4 FloatElemRep)
-
-doubleX2PrimTy :: Type
-doubleX2PrimTy = mkTyConTy doubleX2PrimTyCon
-doubleX2PrimTyCon :: TyCon
-doubleX2PrimTyCon = pcPrimTyCon0 doubleX2PrimTyConName (VecRep 2 DoubleElemRep)
-
-int32X4PrimTy :: Type
-int32X4PrimTy = mkTyConTy int32X4PrimTyCon
-int32X4PrimTyCon :: TyCon
-int32X4PrimTyCon = pcPrimTyCon0 int32X4PrimTyConName (VecRep 4 Int32ElemRep)
-
-int64X2PrimTy :: Type
-int64X2PrimTy = mkTyConTy int64X2PrimTyCon
-int64X2PrimTyCon :: TyCon
-int64X2PrimTyCon = pcPrimTyCon0 int64X2PrimTyConName (VecRep 2 Int64ElemRep)
+#include "primop-vector-tys.hs-incl"
 \end{code}

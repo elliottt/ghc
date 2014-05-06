@@ -3,7 +3,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | Handy functions for creating much Core syntax
@@ -25,9 +25,9 @@ module MkCore (
         -- * Floats
         FloatBind(..), wrapFloat,
 
-        -- * Constructing/deconstructing equality evidence boxes
+        -- * Constructing equality evidence boxes
         mkEqBox,
-        
+
         -- * Constructing general big tuples
         -- $big_tuples
         mkChunkified,
@@ -299,12 +299,17 @@ mkStringExprFS str
 
 \begin{code}
 
+-- This take a ~# b (or a ~# R b) and returns a ~ b (or Coercible a b)
 mkEqBox :: Coercion -> CoreExpr
 mkEqBox co = ASSERT2( typeKind ty2 `eqKind` k, ppr co $$ ppr ty1 $$ ppr ty2 $$ ppr (typeKind ty1) $$ ppr (typeKind ty2) )
-             Var (dataConWorkId eqBoxDataCon) `mkTyApps` [k, ty1, ty2] `App` Coercion co
+             Var (dataConWorkId datacon) `mkTyApps` [k, ty1, ty2] `App` Coercion co
   where Pair ty1 ty2 = coercionKind co
         k = typeKind ty1
-
+        datacon = case coercionRole co of 
+            Nominal ->          eqBoxDataCon
+            Representational -> coercibleDataCon
+            Phantom ->          pprPanic "mkEqBox does not support boxing phantom coercions"
+                                         (ppr co)
 \end{code}
 
 %************************************************************************
@@ -769,7 +774,7 @@ pc_bottoming_Id1 name ty
         -- any pc_bottoming_Id will itself have CafRefs, which bloats
         -- SRTs.
 
-    strict_sig = mkStrictSig (mkTopDmdType [evalDmd] botRes)
+    strict_sig = mkClosedStrictSig [evalDmd] botRes
     -- These "bottom" out, no matter what their arguments
 
 pc_bottoming_Id0 :: Name -> Type -> Id
@@ -778,6 +783,6 @@ pc_bottoming_Id0 name ty
  = mkVanillaGlobalWithInfo name ty bottoming_info
  where
     bottoming_info = vanillaIdInfo `setStrictnessInfo` strict_sig
-    strict_sig = mkStrictSig (mkTopDmdType [] botRes)
+    strict_sig = mkClosedStrictSig [] botRes
 \end{code}
 

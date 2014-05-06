@@ -181,7 +181,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         i386)
             test -z "[$]2" || eval "[$]2=ArchX86"
             ;;
-        x86_64)
+        x86_64|amd64)
             test -z "[$]2" || eval "[$]2=ArchX86_64"
             ;;
         powerpc)
@@ -197,6 +197,9 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
             GET_ARM_ISA()
             test -z "[$]2" || eval "[$]2=\"ArchARM {armISA = \$ARM_ISA, armISAExt = \$ARM_ISA_EXT, armABI = \$ARM_ABI}\""
             ;;
+        aarch64)
+            test -z "[$]2" || eval "[$]2=ArchARM64"
+            ;;
         alpha)
             test -z "[$]2" || eval "[$]2=ArchAlpha"
             ;;
@@ -206,7 +209,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         mipsel)
             test -z "[$]2" || eval "[$]2=ArchMipsel"
             ;;
-        hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sparc64|vax)
+        hppa|hppa1_1|ia64|m68k|powerpc64le|rs6000|s390|s390x|sparc64|vax)
             test -z "[$]2" || eval "[$]2=ArchUnknown"
             ;;
         *)
@@ -464,6 +467,7 @@ AC_DEFUN([FP_SETTINGS],
         SettingsPerlCommand="$PerlCmd"
         SettingsDllWrapCommand="/bin/false"
         SettingsWindresCommand="/bin/false"
+        SettingsLibtoolCommand="libtool"
         SettingsTouchCommand='touch'
         if test -z "$LlcCmd"
         then
@@ -490,6 +494,7 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsPerlCommand)
     AC_SUBST(SettingsDllWrapCommand)
     AC_SUBST(SettingsWindresCommand)
+    AC_SUBST(SettingsLibtoolCommand)
     AC_SUBST(SettingsTouchCommand)
     AC_SUBST(SettingsLlcCommand)
     AC_SUBST(SettingsOptCommand)
@@ -641,6 +646,10 @@ AC_ARG_WITH($2,
     else
         $1=$withval
     fi
+
+    # Remember that we set this manually.  Used to override CC_STAGE0
+    # and friends later, if we are not cross-compiling.
+    With_$2=$withval
 ],
 [
     if test "$HostOS" != "mingw32"
@@ -683,6 +692,10 @@ AC_ARG_WITH($2,
     else
         $1=$withval
     fi
+
+    # Remember that we set this manually.  Used to override CC_STAGE0
+    # and friends later, if we are not cross-compiling.
+    With_$2=$withval
 ],
 [
     if test "$HostOS" != "mingw32"
@@ -846,7 +859,7 @@ AS_IF([test "$fp_num1" $2 "$fp_num2"], [$4], [$5])[]dnl
 
 dnl
 dnl Check for Happy and version.  If we're building GHC, then we need
-dnl at least Happy version 1.14.  If there's no installed Happy, we look
+dnl at least Happy version 1.19.  If there's no installed Happy, we look
 dnl for a happy source tree and point the build system at that instead.
 dnl
 AC_DEFUN([FPTOOLS_HAPPY],
@@ -862,10 +875,10 @@ else
 fi;
 changequote([, ])dnl
 ])
-if test ! -f compiler/parser/Parser.hs || test ! -f compiler/cmm/CmmParse.hs || test ! -f compiler/parser/ParserCore.hs
+if test ! -f compiler/parser/Parser.hs || test ! -f compiler/cmm/CmmParse.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.16],
-      [AC_MSG_ERROR([Happy version 1.16 or later is required to compile GHC.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.19],
+      [AC_MSG_ERROR([Happy version 1.19 or later is required to compile GHC.])])[]
 fi
 HappyVersion=$fptools_cv_happy_version;
 AC_SUBST(HappyVersion)
@@ -893,13 +906,8 @@ FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-ge],[3.0],
   [Alex3=YES],[Alex3=NO])
 if test ! -f compiler/cmm/CmmLex.hs || test ! -f compiler/parser/Lexer.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[2.1.0],
-      [AC_MSG_ERROR([Alex version 2.1.0 or later is required to compile GHC.])])[]
-fi
-if test ! -f utils/haddock/src/Haddock/Lex.hs
-then
-    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[3.0],
-      [AC_MSG_ERROR([Alex version 3.0 or later is required to compile Haddock.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[3.1.0],
+      [AC_MSG_ERROR([Alex version 3.1.0 or later is required to compile GHC.])])[]
 fi
 AlexVersion=$fptools_cv_alex_version;
 AC_SUBST(AlexVersion)
@@ -1140,6 +1148,16 @@ AC_DEFUN([FP_PROG_AR_NEEDS_RANLIB],[
         esac
     fi
 
+    # workaround for AC_PROG_RANLIB which sets RANLIB to `:' when
+    # ranlib is missing on the target OS. The problem is that
+    # ghc-cabal cannot execute `:' which is a shell built-in but can
+    # execute `true' which is usually simple program supported by the
+    # OS.
+    # Fixes #8795
+    if test "$RANLIB" = ":"
+    then
+        RANLIB="true"
+    fi
     REAL_RANLIB_CMD="$RANLIB"
     if test $fp_cv_prog_ar_needs_ranlib = yes
     then
@@ -1182,6 +1200,7 @@ AC_SUBST(GccLT46)
 
 dnl Check to see if the C compiler is clang or llvm-gcc
 dnl
+GccIsClang=NO
 AC_DEFUN([FP_CC_LLVM_BACKEND],
 [AC_REQUIRE([AC_PROG_CC])
 AC_MSG_CHECKING([whether C compiler is clang])
@@ -1189,6 +1208,7 @@ $CC -x c /dev/null -dM -E > conftest.txt 2>&1
 if grep "__clang__" conftest.txt >/dev/null 2>&1; then
   AC_SUBST([CC_CLANG_BACKEND], [1])
   AC_SUBST([CC_LLVM_BACKEND], [1])
+  GccIsClang=YES
   AC_MSG_RESULT([yes])
 else
   AC_MSG_RESULT([no])
@@ -1203,6 +1223,7 @@ else
     AC_MSG_RESULT([no])
   fi
 fi
+AC_SUBST(GccIsClang)
 
 rm -f conftest.txt
 ])
@@ -1788,7 +1809,12 @@ AC_MSG_NOTICE(Building in-tree ghc-pwd)
     dnl except we don't want to have to know what make is called. Sigh.
     rm -rf utils/ghc-pwd/dist-boot
     mkdir  utils/ghc-pwd/dist-boot
-    if ! "$WithGhc" -v0 -no-user-$GHC_PACKAGE_DB_FLAG -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
+    dnl If special linker flags are needed to build things, then allow
+    dnl the user to pass them in via LDFLAGS.
+    changequote(, )dnl
+    GHC_LDFLAGS=`echo $LDFLAGS | sed 's/\(^\| \)\([^ ]\)/\1-optl\2/g'`
+    changequote([, ])dnl
+    if ! "$WithGhc" $GHC_LDFLAGS -v0 -no-user-$GHC_PACKAGE_DB_FLAG -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
     then
         AC_MSG_ERROR([Building ghc-pwd failed])
     fi
@@ -1831,6 +1857,9 @@ AC_MSG_CHECKING(for path to top of build tree)
 # converts cpu from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_CPU],[
 case "$1" in
+  aarch64*)
+    $2="aarch64"
+    ;;
   alpha*)
     $2="alpha"
     ;;
@@ -1861,6 +1890,9 @@ case "$1" in
   mips*)
     $2="mips"
     ;;
+  powerpc64le*)
+    $2="powerpc64le"
+    ;;
   powerpc64*)
     $2="powerpc64"
     ;;
@@ -1885,7 +1917,7 @@ case "$1" in
   vax)
     $2="vax"
     ;;
-  x86_64)
+  x86_64|amd64)
     $2="x86_64"
     ;;
   *)
@@ -2047,9 +2079,26 @@ AC_DEFUN([FIND_GCC],[
     then
         $1="$CC"
     else
-        FP_ARG_WITH_PATH_GNU_PROG([$1], [$2], [$3])
+        FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
+        # From Xcode 5 on, OS X command line tools do not include gcc
+        # anymore. Use clang.
+        if test -z "$$1"
+        then
+            FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
+        fi
+        if test -z "$$1"
+        then
+            AC_MSG_ERROR([cannot find $3 nor clang in your PATH])
+        fi
     fi
     AC_SUBST($1)
+])
+
+AC_DEFUN([MAYBE_OVERRIDE_STAGE0],[
+  if test ! -z "$With_$1" -a "$CrossCompiling" != "YES"; then
+      AC_MSG_NOTICE([Not cross-compiling, so --with-$1 also sets $2])
+      $2=$With_$1
+  fi
 ])
 
 # LocalWords:  fi

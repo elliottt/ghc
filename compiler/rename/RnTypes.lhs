@@ -15,19 +15,14 @@ module RnTypes (
         mkOpAppRn, mkNegAppRn, mkOpFormRn, mkConOpPatRn,
         checkPrecMatch, checkSectionPrec, warnUnusedForAlls,
 
-        -- Splice related stuff
-        rnSplice, checkTH,
-
         -- Binding related stuff
         bindSigTyVarsFV, bindHsTyVars, rnHsBndrSig,
         extractHsTyRdrTyVars, extractHsTysRdrTyVars,
         extractRdrKindSigVars, extractDataDefnKindVars, filterInScope
   ) where
 
-import {-# SOURCE #-} RnExpr( rnLExpr )
-#ifdef GHCI
 import {-# SOURCE #-} TcSplice( runQuasiQuoteType )
-#endif  /* GHCI */
+import {-# SOURCE #-} RnSplice( rnSpliceType )
 
 import DynFlags
 import HsSyn
@@ -213,9 +208,6 @@ rnHsTyKi isType doc (HsKindSig ty k)
        ; (k', fvs2) <- rnLHsKind doc k
        ; return (HsKindSig ty' k', fvs1 `plusFV` fvs2) }
 
-rnHsTyKi _ doc (HsRoleAnnot ty _) 
-  = illegalRoleAnnotDoc doc ty >> failM
-
 rnHsTyKi isType doc (HsPArrTy ty)
   = ASSERT( isType )
     do { (ty', fvs) <- rnLHsType doc ty
@@ -229,12 +221,17 @@ rnHsTyKi isType doc tupleTy@(HsTupleTy tup_con tys)
        ; (tys', fvs) <- mapFvRn (rnLHsTyKi isType doc) tys
        ; return (HsTupleTy tup_con tys', fvs) }
 
--- 1. Perhaps we should use a separate extension here?
--- 2. Check that the integer is positive?
+-- Perhaps we should use a separate extension here?
+-- Ensure that a type-level integer is nonnegative (#8306, #8412)
 rnHsTyKi isType _ tyLit@(HsTyLit t)
   = do { data_kinds <- xoptM Opt_DataKinds
        ; unless (data_kinds || isType) (addErr (dataKindsErr isType tyLit))
+       ; when (negLit t) (addErr negLitErr)
        ; return (HsTyLit t, emptyFVs) }
+  where
+    negLit (HsStrTy _) = False
+    negLit (HsNumTy i) = i < 0
+    negLitErr = ptext (sLit "Illegal literal in type (type literals must not be negative):") <+> ppr tyLit
 
 rnHsTyKi isType doc (HsAppTy ty1 ty2)
   = do { (ty1', fvs1) <- rnLHsTyKi isType doc ty1
@@ -252,10 +249,9 @@ rnHsTyKi isType doc (HsEqTy ty1 ty2)
        ; (ty2', fvs2) <- rnLHsType doc ty2
        ; return (HsEqTy ty1' ty2', fvs1 `plusFV` fvs2) }
 
-rnHsTyKi isType _ (HsSpliceTy sp _ k)
+rnHsTyKi isType _ (HsSpliceTy sp k)
   = ASSERT( isType )
-    do { (sp', fvs) <- rnSplice sp      -- ToDo: deal with fvs
-       ; return (HsSpliceTy sp' fvs k, fvs) }
+    rnSpliceType sp k
 
 rnHsTyKi isType doc (HsDocTy ty haddock_doc)
   = ASSERT( isType )
@@ -263,14 +259,12 @@ rnHsTyKi isType doc (HsDocTy ty haddock_doc)
        ; haddock_doc' <- rnLHsDoc haddock_doc
        ; return (HsDocTy ty' haddock_doc', fvs) }
 
-#ifndef GHCI
-rnHsTyKi _ _ ty@(HsQuasiQuoteTy _) = pprPanic "Can't do quasiquotation without GHCi" (ppr ty)
-#else
 rnHsTyKi isType doc (HsQuasiQuoteTy qq)
   = ASSERT( isType )
     do { ty <- runQuasiQuoteType qq
-       ; rnHsType doc (unLoc ty) }
-#endif
+         -- Wrap the result of the quasi-quoter in parens so that we don't
+         -- lose the outermost location set by runQuasiQuote (#7918) 
+       ; rnHsType doc (HsParTy ty) }
 
 rnHsTyKi isType _ (HsCoreTy ty)
   = ASSERT( isType )
@@ -363,7 +357,7 @@ bindHsTyVars :: HsDocContext
 bindHsTyVars doc mb_assoc kv_bndrs tv_bndrs thing_inside
   = do { rdr_env <- getLocalRdrEnv
        ; let tvs = hsQTvBndrs tv_bndrs
-             kvs_from_tv_bndrs = [ kv | L _ (HsTyVarBndr _ (Just kind) _) <- tvs
+             kvs_from_tv_bndrs = [ kv | L _ (KindedTyVar _ kind) <- tvs
                                  , let (_, kvs) = extractHsTyRdrTyVars kind
                                  , kv <- kvs ]
              all_kvs = filterOut (`elemLocalRdrEnv` rdr_env) $
@@ -385,19 +379,15 @@ bindHsTyVars doc mb_assoc kv_bndrs tv_bndrs thing_inside
     do { let tv_names_w_loc = hsLTyVarLocNames tv_bndrs
 
              rn_tv_bndr :: LHsTyVarBndr RdrName -> RnM (LHsTyVarBndr Name, FreeVars)
-             rn_tv_bndr (L loc (HsTyVarBndr name mkind mrole))
-               = do { ksig_ok <- xoptM Opt_KindSignatures
-                    ; unless ksig_ok $
-                      whenIsJust mkind $ \k -> badSigErr False doc k
-                    ; rsig_ok <- xoptM Opt_RoleAnnotations
-                    ; unless rsig_ok $
-                      whenIsJust mrole $ \_ -> badRoleAnnotOpt loc doc
-                    ; nm <- newTyVarNameRn mb_assoc rdr_env loc name
-                    ; (mkind', fvs) <- case mkind of
-                                         Just k  -> do { (kind', fvs) <- rnLHsKind doc k
-                                                       ; return (Just kind', fvs) }
-                                         Nothing -> return (Nothing, emptyFVs)
-                    ; return (L loc (HsTyVarBndr nm mkind' mrole), fvs) }
+             rn_tv_bndr (L loc (UserTyVar rdr))
+               = do { nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
+                    ; return (L loc (UserTyVar nm), emptyFVs) }
+             rn_tv_bndr (L loc (KindedTyVar rdr kind))
+               = do { sig_ok <- xoptM Opt_KindSignatures
+                    ; unless sig_ok (badSigErr False doc kind)
+                    ; nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
+                    ; (kind', fvs) <- rnLHsKind doc kind
+                    ; return (L loc (KindedTyVar nm kind'), fvs) }
 
        -- Check for duplicate or shadowed tyvar bindrs
        ; checkDupRdrNames tv_names_w_loc
@@ -449,7 +439,7 @@ badKindBndrs :: HsDocContext -> [RdrName] -> SDoc
 badKindBndrs doc kvs
   = vcat [ hang (ptext (sLit "Unexpected kind variable") <> plural kvs
                  <+> pprQuotedList kvs)
-              2 (ptext (sLit "Perhaps you intended to use -XPolyKinds"))
+              2 (ptext (sLit "Perhaps you intended to use PolyKinds"))
          , docOfHsDocContext doc ]
 
 badSigErr :: Bool -> HsDocContext -> LHsType RdrName -> TcM ()
@@ -462,29 +452,16 @@ badSigErr is_type doc (L loc ty)
   where
     what | is_type   = ptext (sLit "type")
          | otherwise = ptext (sLit "kind")
-    flag | is_type   = ptext (sLit "-XScopedTypeVariables")
-         | otherwise = ptext (sLit "-XKindSignatures")
+    flag | is_type   = ptext (sLit "ScopedTypeVariables")
+         | otherwise = ptext (sLit "KindSignatures")
 
 dataKindsErr :: Bool -> HsType RdrName -> SDoc
 dataKindsErr is_type thing
   = hang (ptext (sLit "Illegal") <+> what <> colon <+> quotes (ppr thing))
-       2 (ptext (sLit "Perhaps you intended to use -XDataKinds"))
+       2 (ptext (sLit "Perhaps you intended to use DataKinds"))
   where
     what | is_type   = ptext (sLit "type")
          | otherwise = ptext (sLit "kind")
-
-badRoleAnnotOpt :: SrcSpan -> HsDocContext -> TcM ()
-badRoleAnnotOpt loc doc
-  = setSrcSpan loc $ addErr $
-    vcat [ ptext (sLit "Illegal role annotation")
-         , ptext (sLit "Perhaps you intended to use -XRoleAnnotations")
-         , docOfHsDocContext doc ]
-
-illegalRoleAnnotDoc :: HsDocContext -> LHsType RdrName -> TcM ()
-illegalRoleAnnotDoc doc (L loc ty)
-  = setSrcSpan loc $ addErr $
-    vcat [ ptext (sLit "Illegal role annotation on") <+> (ppr ty)
-         , docOfHsDocContext doc ]
 \end{code}
 
 Note [Renaming associated types]
@@ -848,66 +825,12 @@ opTyErr op ty@(HsOpTy ty1 _ _)
     extra | op == dot_tv_RDR && forall_head ty1
           = perhapsForallMsg
           | otherwise
-          = ptext (sLit "Use -XTypeOperators to allow operators in types")
+          = ptext (sLit "Use TypeOperators to allow operators in types")
 
     forall_head (L _ (HsTyVar tv))   = tv == forall_tv_RDR
     forall_head (L _ (HsAppTy ty _)) = forall_head ty
     forall_head _other               = False
 opTyErr _ ty = pprPanic "opTyErr: Not an op" (ppr ty)
-\end{code}
-
-%*********************************************************
-%*                                                      *
-                Splices
-%*                                                      *
-%*********************************************************
-
-Note [Splices]
-~~~~~~~~~~~~~~
-Consider
-        f = ...
-        h = ...$(thing "f")...
-
-The splice can expand into literally anything, so when we do dependency
-analysis we must assume that it might mention 'f'.  So we simply treat
-all locally-defined names as mentioned by any splice.  This is terribly
-brutal, but I don't see what else to do.  For example, it'll mean
-that every locally-defined thing will appear to be used, so no unused-binding
-warnings.  But if we miss the dependency, then we might typecheck 'h' before 'f',
-and that will crash the type checker because 'f' isn't in scope.
-
-Currently, I'm not treating a splice as also mentioning every import,
-which is a bit inconsistent -- but there are a lot of them.  We might
-thereby get some bogus unused-import warnings, but we won't crash the
-type checker.  Not very satisfactory really.
-
-\begin{code}
-rnSplice :: HsSplice RdrName -> RnM (HsSplice Name, FreeVars)
-rnSplice (HsSplice n expr)
-  = do  { checkTH expr "splice"
-        ; loc  <- getSrcSpanM
-        ; n' <- newLocalBndrRn (L loc n)
-        ; (expr', fvs) <- rnLExpr expr
-
-        -- Ugh!  See Note [Splices] above
-        ; lcl_rdr <- getLocalRdrEnv
-        ; gbl_rdr <- getGlobalRdrEnv
-        ; let gbl_names = mkNameSet [gre_name gre | gre <- globalRdrEnvElts gbl_rdr,
-                                                    isLocalGRE gre]
-              lcl_names = mkNameSet (localRdrEnvElts lcl_rdr)
-
-        ; return (HsSplice n' expr', fvs `plusFV` lcl_names `plusFV` gbl_names) }
-
-checkTH :: Outputable a => a -> String -> RnM ()
-#ifdef GHCI
-checkTH _ _ = return () -- OK
-#else
-checkTH e what  -- Raise an error in a stage-1 compiler
-  = addErr (vcat [ptext (sLit "Template Haskell") <+> text what <+>
-                  ptext (sLit "requires GHC with interpreter support"),
-                  ptext (sLit "Perhaps you are using a stage-1 compiler?"),
-                  nest 2 (ppr e)])
-#endif
 \end{code}
 
 %************************************************************************
@@ -1031,7 +954,6 @@ extract_lty (L _ ty) acc
       HsTyLit _                 -> acc
       HsWrapTy _ _              -> panic "extract_lty"
       HsKindSig ty ki           -> extract_lty ty (extract_lkind ki acc)
-      HsRoleAnnot ty _          -> extract_lty ty acc
       HsForAllTy _ tvs cx ty    -> extract_hs_tv_bndrs tvs acc $
                                    extract_lctxt cx   $
                                    extract_lty ty ([],[])
@@ -1048,7 +970,7 @@ extract_hs_tv_bndrs (HsQTvs { hsq_tvs = tvs })
      acc_tvs ++ filterOut (`elem` local_tvs) body_tvs)
   where
     local_tvs = map hsLTyVarName tvs
-    (_, local_kvs) = foldr extract_lty ([], []) [k | L _ (HsTyVarBndr _ (Just k) _) <- tvs]
+    (_, local_kvs) = foldr extract_lty ([], []) [k | L _ (KindedTyVar _ k) <- tvs]
        -- These kind variables are bound here if not bound further out
 
 extract_tv :: RdrName -> FreeKiTyVars -> FreeKiTyVars

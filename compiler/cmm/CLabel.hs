@@ -54,8 +54,13 @@ module CLabel (
         mkIndStaticInfoLabel,
         mkMainCapabilityLabel,
         mkMAP_FROZEN_infoLabel,
+        mkMAP_FROZEN0_infoLabel,
         mkMAP_DIRTY_infoLabel,
+        mkSMAP_FROZEN_infoLabel,
+        mkSMAP_FROZEN0_infoLabel,
+        mkSMAP_DIRTY_infoLabel,
         mkEMPTY_MVAR_infoLabel,
+        mkArrWords_infoLabel,
 
         mkTopTickyCtrLabel,
         mkCAFBlackHoleInfoTableLabel,
@@ -400,21 +405,28 @@ mkStaticConEntryLabel name  c     = IdLabel name c StaticConEntry
 -- Constructing Cmm Labels
 mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
     mkBHUpdInfoLabel, mkIndStaticInfoLabel, mkMainCapabilityLabel,
-    mkMAP_FROZEN_infoLabel, mkMAP_DIRTY_infoLabel,
+    mkMAP_FROZEN_infoLabel, mkMAP_FROZEN0_infoLabel, mkMAP_DIRTY_infoLabel,
     mkEMPTY_MVAR_infoLabel, mkTopTickyCtrLabel,
-    mkCAFBlackHoleInfoTableLabel, mkCAFBlackHoleEntryLabel :: CLabel
+    mkCAFBlackHoleInfoTableLabel, mkCAFBlackHoleEntryLabel,
+    mkArrWords_infoLabel, mkSMAP_FROZEN_infoLabel, mkSMAP_FROZEN0_infoLabel,
+    mkSMAP_DIRTY_infoLabel :: CLabel
 mkDirty_MUT_VAR_Label           = mkForeignLabel (fsLit "dirty_MUT_VAR") Nothing ForeignLabelInExternalPackage IsFunction
 mkSplitMarkerLabel              = CmmLabel rtsPackageId (fsLit "__stg_split_marker")    CmmCode
 mkUpdInfoLabel                  = CmmLabel rtsPackageId (fsLit "stg_upd_frame")         CmmInfo
 mkBHUpdInfoLabel                = CmmLabel rtsPackageId (fsLit "stg_bh_upd_frame" )     CmmInfo
 mkIndStaticInfoLabel            = CmmLabel rtsPackageId (fsLit "stg_IND_STATIC")        CmmInfo
 mkMainCapabilityLabel           = CmmLabel rtsPackageId (fsLit "MainCapability")        CmmData
-mkMAP_FROZEN_infoLabel          = CmmLabel rtsPackageId (fsLit "stg_MUT_ARR_PTRS_FROZEN0") CmmInfo
+mkMAP_FROZEN_infoLabel          = CmmLabel rtsPackageId (fsLit "stg_MUT_ARR_PTRS_FROZEN") CmmInfo
+mkMAP_FROZEN0_infoLabel         = CmmLabel rtsPackageId (fsLit "stg_MUT_ARR_PTRS_FROZEN0") CmmInfo
 mkMAP_DIRTY_infoLabel           = CmmLabel rtsPackageId (fsLit "stg_MUT_ARR_PTRS_DIRTY") CmmInfo
 mkEMPTY_MVAR_infoLabel          = CmmLabel rtsPackageId (fsLit "stg_EMPTY_MVAR")        CmmInfo
 mkTopTickyCtrLabel              = CmmLabel rtsPackageId (fsLit "top_ct")                CmmData
 mkCAFBlackHoleInfoTableLabel    = CmmLabel rtsPackageId (fsLit "stg_CAF_BLACKHOLE")     CmmInfo
 mkCAFBlackHoleEntryLabel        = CmmLabel rtsPackageId (fsLit "stg_CAF_BLACKHOLE")     CmmEntry
+mkArrWords_infoLabel            = CmmLabel rtsPackageId (fsLit "stg_ARR_WORDS")         CmmInfo
+mkSMAP_FROZEN_infoLabel         = CmmLabel rtsPackageId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN") CmmInfo
+mkSMAP_FROZEN0_infoLabel        = CmmLabel rtsPackageId (fsLit "stg_SMALL_MUT_ARR_PTRS_FROZEN0") CmmInfo
+mkSMAP_DIRTY_infoLabel          = CmmLabel rtsPackageId (fsLit "stg_SMALL_MUT_ARR_PTRS_DIRTY") CmmInfo
 
 -----
 mkCmmInfoLabel,   mkCmmEntryLabel, mkCmmRetInfoLabel, mkCmmRetLabel,

@@ -30,7 +30,7 @@ import Panic
 --              (which are disjoint) ie. x86, x86_64 and ppc
 --
 --      The number of allocatable regs is hard coded in here so we can do
---              a fast comparision in trivColorable.
+--              a fast comparison in trivColorable.
 --
 --      It's ok if these numbers are _less_ than the actual number of free
 --              regs, but they can't be more or the register conflict
@@ -113,9 +113,11 @@ trivColorable platform virtualRegSqueeze realRegSqueeze RcInteger conflicts excl
                             ArchSPARC     -> 14
                             ArchPPC_64    -> panic "trivColorable ArchPPC_64"
                             ArchARM _ _ _ -> panic "trivColorable ArchARM"
+                            ArchARM64     -> panic "trivColorable ArchARM64"
                             ArchAlpha     -> panic "trivColorable ArchAlpha"
                             ArchMipseb    -> panic "trivColorable ArchMipseb"
                             ArchMipsel    -> panic "trivColorable ArchMipsel"
+                            ArchJavaScript-> panic "trivColorable ArchJavaScript"
                             ArchUnknown   -> panic "trivColorable ArchUnknown")
         , count2        <- accSqueeze (_ILIT(0)) cALLOCATABLE_REGS_INTEGER
                                 (virtualRegSqueeze RcInteger)
@@ -136,9 +138,11 @@ trivColorable platform virtualRegSqueeze realRegSqueeze RcFloat conflicts exclus
                             ArchSPARC     -> 22
                             ArchPPC_64    -> panic "trivColorable ArchPPC_64"
                             ArchARM _ _ _ -> panic "trivColorable ArchARM"
+                            ArchARM64     -> panic "trivColorable ArchARM64"
                             ArchAlpha     -> panic "trivColorable ArchAlpha"
                             ArchMipseb    -> panic "trivColorable ArchMipseb"
                             ArchMipsel    -> panic "trivColorable ArchMipsel"
+                            ArchJavaScript-> panic "trivColorable ArchJavaScript"
                             ArchUnknown   -> panic "trivColorable ArchUnknown")
         , count2        <- accSqueeze (_ILIT(0)) cALLOCATABLE_REGS_FLOAT
                                 (virtualRegSqueeze RcFloat)
@@ -159,9 +163,11 @@ trivColorable platform virtualRegSqueeze realRegSqueeze RcDouble conflicts exclu
                             ArchSPARC     -> 11
                             ArchPPC_64    -> panic "trivColorable ArchPPC_64"
                             ArchARM _ _ _ -> panic "trivColorable ArchARM"
+                            ArchARM64     -> panic "trivColorable ArchARM64"
                             ArchAlpha     -> panic "trivColorable ArchAlpha"
                             ArchMipseb    -> panic "trivColorable ArchMipseb"
                             ArchMipsel    -> panic "trivColorable ArchMipsel"
+                            ArchJavaScript-> panic "trivColorable ArchJavaScript"
                             ArchUnknown   -> panic "trivColorable ArchUnknown")
         , count2        <- accSqueeze (_ILIT(0)) cALLOCATABLE_REGS_DOUBLE
                                 (virtualRegSqueeze RcDouble)
@@ -182,9 +188,11 @@ trivColorable platform virtualRegSqueeze realRegSqueeze RcDoubleSSE conflicts ex
                             ArchSPARC     -> 0
                             ArchPPC_64    -> panic "trivColorable ArchPPC_64"
                             ArchARM _ _ _ -> panic "trivColorable ArchARM"
+                            ArchARM64     -> panic "trivColorable ArchARM64"
                             ArchAlpha     -> panic "trivColorable ArchAlpha"
                             ArchMipseb    -> panic "trivColorable ArchMipseb"
                             ArchMipsel    -> panic "trivColorable ArchMipsel"
+                            ArchJavaScript-> panic "trivColorable ArchJavaScript"
                             ArchUnknown   -> panic "trivColorable ArchUnknown")
         , count2        <- accSqueeze (_ILIT(0)) cALLOCATABLE_REGS_SSE
                                 (virtualRegSqueeze RcDoubleSSE)

@@ -27,7 +27,9 @@ import DsBinds
 import DsGRHSs
 import DsUtils
 import Id
+import ConLike
 import DataCon
+import PatSyn
 import MatchCon
 import MatchLit
 import Type
@@ -38,7 +40,7 @@ import Maybes
 import Util
 import Name
 import Outputable
-import BasicTypes ( boxityNormalTupleSort )
+import BasicTypes ( boxityNormalTupleSort, isGenerated )
 import FastString
 
 import Control.Monad( when )
@@ -90,6 +92,8 @@ matchCheck_really dflags ctx@(DsMatchContext hs_ctx _) vars ty qs
 
     incomplete_flag RecUpd        = wopt Opt_WarnIncompletePatternsRecUpd dflags
 
+    incomplete_flag ThPatSplice   = False
+    incomplete_flag PatSyn        = False
     incomplete_flag ThPatQuote    = False
     incomplete_flag (StmtCtxt {}) = False  -- Don't warn about incomplete patterns
                                            -- in list comprehensions, pattern guards
@@ -313,6 +317,7 @@ match vars@(v:_) ty eqns    -- Eqns *can* be empty
     match_group eqns@((group,_) : _)
         = case group of
             PgCon _    -> matchConFamily  vars ty (subGroup [(c,e) | (PgCon c, e) <- eqns])
+            PgSyn _    -> matchPatSyn     vars ty (dropGroup eqns)
             PgLit _    -> matchLiterals   vars ty (subGroup [(l,e) | (PgLit l, e) <- eqns])
             PgAny      -> matchVariables  vars ty (dropGroup eqns)
             PgN _      -> matchNPats      vars ty (dropGroup eqns)
@@ -581,8 +586,6 @@ tidy1 _ non_interesting_pat
 
 --------------------
 tidy_bang_pat :: Id -> SrcSpan -> Pat Id -> DsM (DsWrapper, Pat Id)
--- BangPatterns: Pattern matching is already strict in constructors,
--- tuples etc, so the last case strips off the bang for those patterns.
 
 -- Discard bang around strict pattern
 tidy_bang_pat v _ p@(ListPat {})   = tidy1 v p
@@ -591,8 +594,7 @@ tidy_bang_pat v _ p@(PArrPat {})   = tidy1 v p
 tidy_bang_pat v _ p@(ConPatOut {}) = tidy1 v p
 tidy_bang_pat v _ p@(LitPat {})    = tidy1 v p
 
--- Discard lazy/par/sig under a bang
-tidy_bang_pat v _ (LazyPat (L l p))     = tidy_bang_pat v l p
+-- Discard par/sig under a bang
 tidy_bang_pat v _ (ParPat (L l p))      = tidy_bang_pat v l p
 tidy_bang_pat v _ (SigPatOut (L l p) _) = tidy_bang_pat v l p
 
@@ -602,7 +604,10 @@ tidy_bang_pat v l (AsPat v' p)  = tidy1 v (AsPat v' (L l (BangPat p)))
 tidy_bang_pat v l (CoPat w p t) = tidy1 v (CoPat w (BangPat (L l p)) t)
 
 -- Default case, leave the bang there:
--- VarPat, WildPat, ViewPat, NPat, NPlusKPat
+-- VarPat, LazyPat, WildPat, ViewPat, NPat, NPlusKPat
+-- For LazyPat, remember that it's semantically like a VarPat
+--  i.e.  !(~p) is not like ~p, or p!  (Trac #8952)
+
 tidy_bang_pat _ l p = return (idDsWrapper, BangPat (L l p))
   -- NB: SigPatIn, ConPatIn should not happen
 \end{code}
@@ -747,18 +752,24 @@ JJQC 30-Nov-1997
 \begin{code}
 matchWrapper ctxt (MG { mg_alts = matches
                       , mg_arg_tys = arg_tys
-                      , mg_res_ty = rhs_ty })
+                      , mg_res_ty = rhs_ty
+                      , mg_origin = origin })
   = do  { eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
-        ; result_expr <- matchEquations ctxt new_vars eqns_info rhs_ty
+        ; result_expr <- handleWarnings $
+                         matchEquations ctxt new_vars eqns_info rhs_ty
         ; return (new_vars, result_expr) }
   where
     mk_eqn_info (L _ (Match pats _ grhss))
       = do { let upats = map unLoc pats
            ; match_result <- dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
+
+    handleWarnings = if isGenerated origin
+                     then discardWarningsDs
+                     else id
 
 
 matchEquations  :: HsMatchContext Name
@@ -830,6 +841,7 @@ data PatGroup
   = PgAny               -- Immediate match: variables, wildcards,
                         --                  lazy patterns
   | PgCon DataCon       -- Constructor patterns (incl list, tuple)
+  | PgSyn PatSyn
   | PgLit Literal       -- Literal patterns
   | PgN   Literal       -- Overloaded literals
   | PgNpK Literal       -- n+k patterns
@@ -885,6 +897,7 @@ sameGroup :: PatGroup -> PatGroup -> Bool
 sameGroup PgAny      PgAny      = True
 sameGroup PgBang     PgBang     = True
 sameGroup (PgCon _)  (PgCon _)  = True          -- One case expression
+sameGroup (PgSyn p1) (PgSyn p2) = p1==p2
 sameGroup (PgLit _)  (PgLit _)  = True          -- One case expression
 sameGroup (PgN l1)   (PgN l2)   = l1==l2        -- Order is significant
 sameGroup (PgNpK l1) (PgNpK l2) = l1==l2        -- See Note [Grouping overloaded literal patterns]
@@ -995,24 +1008,26 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
 
     ---------
     eq_co :: TcCoercion -> TcCoercion -> Bool
-    -- Just some simple cases
-    eq_co (TcRefl t1)             (TcRefl t2)             = eqType t1 t2
-    eq_co (TcCoVarCo v1)          (TcCoVarCo v2)          = v1==v2
-    eq_co (TcSymCo co1)           (TcSymCo co2)           = co1 `eq_co` co2
-    eq_co (TcTyConAppCo tc1 cos1) (TcTyConAppCo tc2 cos2) = tc1==tc2 && eq_list eq_co cos1 cos2
+    -- Just some simple cases (should the r1 == r2 rather be an ASSERT?)
+    eq_co (TcRefl r1 t1)             (TcRefl r2 t2)             = r1 == r2 && eqType t1 t2
+    eq_co (TcCoVarCo v1)             (TcCoVarCo v2)             = v1==v2
+    eq_co (TcSymCo co1)              (TcSymCo co2)              = co1 `eq_co` co2
+    eq_co (TcTyConAppCo r1 tc1 cos1) (TcTyConAppCo r2 tc2 cos2) = r1 == r2 && tc1==tc2 && eq_list eq_co cos1 cos2
     eq_co _ _ = False
 
 patGroup :: DynFlags -> Pat Id -> PatGroup
-patGroup _      (WildPat {})                 = PgAny
-patGroup _      (BangPat {})                 = PgBang
-patGroup _      (ConPatOut { pat_con = dc }) = PgCon (unLoc dc)
-patGroup dflags (LitPat lit)                 = PgLit (hsLitKey dflags lit)
-patGroup _      (NPat olit mb_neg _)         = PgN   (hsOverLitKey olit (isJust mb_neg))
-patGroup _      (NPlusKPat _ olit _ _)       = PgNpK (hsOverLitKey olit False)
-patGroup _      (CoPat _ p _)                = PgCo  (hsPatType p) -- Type of innelexp pattern
-patGroup _      (ViewPat expr p _)           = PgView expr (hsPatType (unLoc p))
-patGroup _      (ListPat _ _ (Just _))       = PgOverloadedList
-patGroup _      pat = pprPanic "patGroup" (ppr pat)
+patGroup _      (WildPat {})                  = PgAny
+patGroup _      (BangPat {})                  = PgBang
+patGroup _      (ConPatOut { pat_con = con }) = case unLoc con of
+    RealDataCon dcon -> PgCon dcon
+    PatSynCon psyn -> PgSyn psyn
+patGroup dflags (LitPat lit)                  = PgLit (hsLitKey dflags lit)
+patGroup _      (NPat olit mb_neg _)          = PgN   (hsOverLitKey olit (isJust mb_neg))
+patGroup _      (NPlusKPat _ olit _ _)        = PgNpK (hsOverLitKey olit False)
+patGroup _      (CoPat _ p _)                 = PgCo  (hsPatType p) -- Type of innelexp pattern
+patGroup _      (ViewPat expr p _)            = PgView expr (hsPatType (unLoc p))
+patGroup _      (ListPat _ _ (Just _))        = PgOverloadedList
+patGroup _      pat                           = pprPanic "patGroup" (ppr pat)
 \end{code}
 
 Note [Grouping overloaded literal patterns]
